@@ -25,6 +25,9 @@ const extractTokenFromRequest = (req) => {
       req.headers?.['x-admin-key'] ||
       req.headers?.['X-Api-Key'] ||
       req.headers?.['X-Admin-Key'] ||
+      req.headers?.['x-openclaw-client'] ||
+      req.headers?.['x-openclaw-key'] ||
+      req.headers?.['x-agent-key'] ||
       req.body?.apiKey ||
       req.query?.apiKey ||
       '',

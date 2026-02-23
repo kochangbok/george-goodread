@@ -4,6 +4,16 @@ const STORAGE_KEY = 'georges-goodreads-library-v2';
 const ADMIN_SESSION_KEY = 'georges-goodreads-admin-session-v1';
 const ADMIN_SESSION_TTL_MS = 3 * 60 * 60 * 1000;
 const ADMIN_PASSWORD = import.meta.env.VITE_ADMIN_PASSWORD || 'spark365';
+const ADMIN_API_KEY = (() => {
+  const direct = String(import.meta.env.VITE_ADMIN_API_KEY || '').trim();
+  if (direct) return direct;
+  const list = String(import.meta.env.VITE_ADMIN_API_KEYS || '').trim();
+  if (!list) return '';
+  return list
+    .split(',')
+    .map((entry) => entry.trim())
+    .find(Boolean) || '';
+})();
 const DEFAULT_AUTHOR = '미지정';
 const USE_GITHUB_LIBRARY = (import.meta.env.VITE_USE_GITHUB_LIBRARY || 'true').toLowerCase() !== 'false';
 
@@ -375,11 +385,15 @@ const buildGitHubPath = (title, sourceUrl) => {
 };
 
 const publishToGitHub = async (payload) => {
+  const headers = { 'content-type': 'application/json' };
+  if (ADMIN_API_KEY) {
+    headers['x-openclaw-client'] = ADMIN_API_KEY;
+    headers.Authorization = `Bearer ${ADMIN_API_KEY}`;
+  }
+
   const response = await fetch('/api/save-content', {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-    },
+    headers,
     body: JSON.stringify(payload),
   });
 
@@ -392,11 +406,15 @@ const publishToGitHub = async (payload) => {
 };
 
 const deleteFromGitHub = async (id) => {
+  const headers = { 'content-type': 'application/json' };
+  if (ADMIN_API_KEY) {
+    headers['x-openclaw-client'] = ADMIN_API_KEY;
+    headers.Authorization = `Bearer ${ADMIN_API_KEY}`;
+  }
+
   const response = await fetch('/api/delete-content', {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-    },
+    headers,
     body: JSON.stringify({ id }),
   });
   const body = await response.json().catch(() => ({}));
