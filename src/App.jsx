@@ -398,7 +398,6 @@ export default function App() {
   const [activeCategory, setActiveCategory] = useState('all');
   const [activeType, setActiveType] = useState('all');
   const [query, setQuery] = useState('');
-  const [openItems, setOpenItems] = useState({});
   const [adminForm, setAdminForm] = useState(ADMIN_MODE_DEFAULT);
   const [adminBusy, setAdminBusy] = useState(false);
   const [adminMessage, setAdminMessage] = useState('');
@@ -463,6 +462,12 @@ export default function App() {
     [library, route],
   );
 
+  const adminItems = useMemo(
+    () =>
+      [...library].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)),
+    [library],
+  );
+
   const goToFeed = () => {
     window.location.hash = '';
   };
@@ -475,16 +480,9 @@ export default function App() {
     window.location.hash = itemRouteHash(id);
   };
 
-  const toggleOpen = (id) => setOpenItems((prev) => ({ ...prev, [id]: !prev[id] }));
-
   const removeItem = (id) => {
     if (!window.confirm('정말 삭제할까요?')) return;
     setLibrary((prev) => prev.filter((item) => item.id !== id));
-    setOpenItems((prev) => {
-      const next = { ...prev };
-      delete next[id];
-      return next;
-    });
     if (editingItemId === id) {
       setEditingItemId('');
       setAdminForm((prev) => ({ ...ADMIN_MODE_DEFAULT, mode: prev.mode }));
@@ -1203,6 +1201,42 @@ export default function App() {
                   </div>
                 </aside>
               </div>
+
+              <section className="panel composer">
+                <h3>관리자 콘텐츠 목록</h3>
+                {adminItems.length === 0 ? (
+                  <p className="muted">등록된 콘텐츠가 없습니다.</p>
+                ) : (
+                  <div className="card-stack">
+                    {adminItems.map((item) => {
+                      const type = TYPE_OPTIONS.find((entry) => entry.id === item.type) ?? TYPE_OPTIONS[0];
+                      return (
+                        <article key={item.id} className="item-card">
+                          <div className="item-head">
+                            <span className="type-chip" style={{ borderColor: type.color }}>
+                              <span>{type.icon}</span>
+                              {type.label}
+                            </span>
+                            <span className="item-date">{formatDate(item.createdAt)}</span>
+                          </div>
+                          <h3>{item.title}</h3>
+                          <p className="muted tags-row">
+                            {(item.tags || []).map((tag) => `#${tag}`).join(' ') || '태그 없음'}
+                          </p>
+                          <div className="item-actions">
+                            <button type="button" className="btn ghost" onClick={() => setAdminFromItem(item)}>
+                              수정
+                            </button>
+                            <button type="button" className="btn danger" onClick={() => removeItem(item.id)}>
+                              삭제
+                            </button>
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
             </>
           ) : (
             <form className="admin-auth" onSubmit={handleAdminLogin}>
@@ -1265,19 +1299,6 @@ export default function App() {
               <div className="markdown-block">
                 <MarkdownBlock markdown={currentItem.summary} />
               </div>
-              <div className="item-actions">
-                <button type="button" className="btn ghost" onClick={() => setAdminFromItem(currentItem)}>
-                  수정
-                </button>
-                {currentItem.sourceUrl ? (
-                  <a className="btn ghost" href={currentItem.sourceUrl} target="_blank" rel="noopener noreferrer">
-                    원문 열기
-                  </a>
-                ) : null}
-                <button type="button" className="btn danger" onClick={() => removeItem(currentItem.id)}>
-                  삭제
-                </button>
-              </div>
             </article>
           )}
         </section>
@@ -1300,7 +1321,6 @@ export default function App() {
                 {filteredItems.map((item) => {
                   const type = TYPE_OPTIONS.find((entry) => entry.id === item.type) ?? TYPE_OPTIONS[0];
                   const category = CATEGORY_OPTIONS.find((entry) => entry.id === item.category)?.label ?? '기타';
-                  const isOpen = !!openItems[item.id];
                   return (
                     <article key={item.id} className="item-card">
                       <div className="item-head">
@@ -1316,32 +1336,14 @@ export default function App() {
                         <span className="muted">출처: {item.source || '미지정'}</span>
                       </div>
                       <p className="excerpt">
-                        {isOpen ? (
-                          <MarkdownBlock markdown={item.summary} />
-                        ) : (
-                          truncate(item.summary, 180)
-                        )}
+                        {truncate(item.summary, 180)}
                       </p>
                       <p className="muted tags-row">
                         {item.tags.map((tag) => `#${tag}`).join(' ') || '태그 없음'}
                       </p>
                       <div className="item-actions">
                         <button type="button" className="btn" onClick={() => goToItem(item.id)}>
-                          상세 보기
-                        </button>
-                        <button type="button" className="btn ghost" onClick={() => toggleOpen(item.id)}>
-                          {isOpen ? '닫기' : '마크다운 열기'}
-                        </button>
-                        <button type="button" className="btn ghost" onClick={() => setAdminFromItem(item)}>
-                          수정
-                        </button>
-                        {item.sourceUrl ? (
-                          <a className="btn ghost" href={item.sourceUrl} target="_blank" rel="noopener noreferrer">
-                            원문 열기
-                          </a>
-                        ) : null}
-                        <button type="button" className="btn danger" onClick={() => removeItem(item.id)}>
-                          삭제
+                          전문 읽기
                         </button>
                       </div>
                     </article>
