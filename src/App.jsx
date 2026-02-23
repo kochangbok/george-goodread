@@ -189,14 +189,62 @@ const extractMetaLine = (markdown, key) => {
   return match?.[1]?.trim() || '';
 };
 
-const formatDate = (iso) =>
-  new Date(iso).toLocaleDateString('ko-KR', {
+const isLegacyDate = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return true;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return true;
+  if (/^\d{4}-\d{2}-\d{2}T00:00:00(?:\.\d+)?Z$/i.test(raw)) return true;
+
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime());
+};
+
+const formatDateInput = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    return new Date(`${raw}T00:00:00`);
+  }
+
+  if (/^\d{4}-\d{2}-\d{2}T00:00:00(?:\.\d+)?Z$/i.test(raw)) {
+    return new Date(`${raw.slice(0, 10)}T00:00:00`);
+  }
+
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return '';
+
+  return parsed;
+};
+
+const formatDate = (iso) => {
+  const parsed = formatDateInput(iso);
+  if (!parsed) return '시간 미설정';
+
+  return parsed.toLocaleString('ko-KR', {
     year: 'numeric',
     month: 'short',
     day: 'numeric',
     hour: '2-digit',
     minute: '2-digit',
+    timeZone: 'Asia/Seoul',
+    hour12: true,
   });
+};
+
+const itemTimeInfo = (item) => {
+  const createdAt = formatDate(item?.createdAt);
+  const updatedAt = formatDate(item?.updatedAt || item?.createdAt);
+
+  const createdText = createdAt || '시간 미설정';
+  const updatedText = updatedAt || createdText;
+
+  if (createdText === updatedText) {
+    return `업로드/수정: ${createdText}`;
+  }
+
+  return `업로드: ${createdText} · 수정: ${updatedText}`;
+};
 
 const escapeHtml = (value) =>
   String(value)
@@ -570,7 +618,7 @@ export default function App() {
         const haystack = `${item.title} ${item.source} ${item.summary} ${item.tags?.join(' ')}`.toLowerCase();
         return haystack.includes(needle);
       })
-      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+      .sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt));
   }, [activeCategory, activeType, library, query]);
 
   const editingItemTitle = useMemo(
@@ -585,7 +633,7 @@ export default function App() {
 
   const adminItems = useMemo(
     () =>
-      [...library].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)),
+      [...library].sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt)),
     [library],
   );
 
@@ -922,12 +970,14 @@ export default function App() {
     }
 
     const isUpdate = Boolean(editingItemId);
+    const existingCreatedAt = current?.createdAt && !isLegacyDate(current.createdAt) ? current.createdAt : '';
+    const safeCreatedAt = existingCreatedAt || now;
     const draftFilePath = current?.filePath || buildGitHubPath(draft.title, draft.sourceUrl);
     const entry = {
       id: editingItemId || `admin-${Date.now()}`,
       ...draft,
       filePath: draftFilePath,
-      createdAt: current?.createdAt || now,
+      createdAt: safeCreatedAt,
       updatedAt: now,
     };
 
@@ -1401,7 +1451,7 @@ export default function App() {
                               <span>{type.icon}</span>
                               {type.label}
                             </span>
-                            <span className="item-date">{formatDate(item.createdAt)}</span>
+                            <span className="item-date">{itemTimeInfo(item)}</span>
                           </div>
                           <h3>{item.title}</h3>
                           <p className="muted tags-row">
@@ -1468,7 +1518,7 @@ export default function App() {
                   <span>{(TYPE_OPTIONS.find((entry) => entry.id === currentItem.type) ?? TYPE_OPTIONS[0]).icon}</span>
                   {(TYPE_OPTIONS.find((entry) => entry.id === currentItem.type) ?? TYPE_OPTIONS[0]).label}
                 </span>
-                <span className="item-date">{formatDate(currentItem.createdAt)}</span>
+                <span className="item-date">{itemTimeInfo(currentItem)}</span>
               </div>
               <h3>{currentItem.title}</h3>
               <div className="item-meta">
@@ -1496,7 +1546,7 @@ export default function App() {
                       <div key={item.id} className="comment-item">
                         <p className="comment-meta">
                           <span>{item.name}</span>
-                          <span>{formatDate(item.createdAt)}</span>
+                        <span>{formatDate(item.createdAt)}</span>
                         </p>
                         <p>{item.message}</p>
                       </div>
@@ -1587,7 +1637,7 @@ export default function App() {
                           <span>{type.icon}</span>
                           {type.label}
                         </span>
-                        <span className="item-date">{formatDate(item.createdAt)}</span>
+                        <span className="item-date">{itemTimeInfo(item)}</span>
                       </div>
                       <h3>{item.title}</h3>
                       <div className="item-meta">

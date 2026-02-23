@@ -31,6 +31,22 @@ const normalizeItem = (item) => {
   return safe;
 };
 
+const isLegacyTime = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return true;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return true;
+  if (/^\d{4}-\d{2}-\d{2}T00:00:00(?:\.\d+)?Z$/i.test(raw)) return true;
+
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime());
+};
+
+const normalizeTimestamp = (value, fallback) => {
+  if (isLegacyTime(value)) return fallback;
+  const parsed = new Date(String(value || '').trim());
+  return Number.isNaN(parsed.getTime()) ? fallback : parsed.toISOString();
+};
+
 const sanitizeItems = (items = []) =>
   items
     .map((item) => normalizeItem(item))
@@ -61,11 +77,22 @@ const buildGitHubPath = (title, sourceUrl) => {
 
 const normalizePayload = (body, previousItems = []) => {
   const legacy = body?.item && typeof body.item === 'object';
+  const now = new Date().toISOString();
 
   if (legacy) {
+    const existing = previousItems.find((entry) => entry.id === body.item.id);
+    const existingCreatedAt = existing?.createdAt && !isLegacyTime(existing.createdAt) ? existing.createdAt : '';
+
     const item = normalizeItem(body.item || {});
     const markdown = String(body.markdown || item.summary || '').trim();
-    return { item, markdown };
+    return {
+      item: {
+        ...item,
+        createdAt: normalizeTimestamp(existingCreatedAt || item.createdAt, now),
+        updatedAt: now,
+      },
+      markdown,
+    };
   }
 
   const markdown = String(
@@ -87,10 +114,13 @@ const normalizePayload = (body, previousItems = []) => {
     source: body?.source || '미지정',
     category: body?.category || 'ai',
   });
+  const existingCreatedAt = existing?.createdAt && !isLegacyTime(existing.createdAt) ? existing.createdAt : '';
 
   return {
     item: {
       ...itemInput,
+      createdAt: normalizeTimestamp(existingCreatedAt || itemInput.createdAt, now),
+      updatedAt: now,
       filePath:
         existing?.filePath ||
         itemInput.filePath ||
