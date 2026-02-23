@@ -1345,6 +1345,7 @@ export default function App() {
                     <article
                       key={item.id}
                       className="item-card"
+                      style={{ cursor: 'pointer' }}
                       role="button"
                       tabIndex={0}
                       onClick={() => goToItem(item.id)}
