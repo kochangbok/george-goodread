@@ -3,7 +3,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 const STORAGE_KEY = 'georges-goodreads-library-v2';
 const ADMIN_SESSION_KEY = 'georges-goodreads-admin-session-v1';
 const ADMIN_SESSION_TTL_MS = 3 * 60 * 60 * 1000;
-const ADMIN_PASSWORD = import.meta.env.VITE_ADMIN_PASSWORD || '';
+const ADMIN_PASSWORD = import.meta.env.VITE_ADMIN_PASSWORD || 'spark365';
 const DEFAULT_AUTHOR = '미지정';
 const AUTO_GITHUB_PUBLISH = (import.meta.env.VITE_AUTO_GITHUB_PUBLISH || 'false').toLowerCase() === 'true';
 
@@ -132,6 +132,13 @@ const parseTags = (raw) =>
     .split(',')
     .map((tag) => tag.trim())
     .filter(Boolean);
+
+const extractMetaLine = (markdown, key) => {
+  const escaped = String(key).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const matcher = new RegExp(`^-\\s*${escaped}:\\s*(.+)$`, 'm');
+  const match = String(markdown || '').match(matcher);
+  return match?.[1]?.trim() || '';
+};
 
 const formatDate = (iso) =>
   new Date(iso).toLocaleDateString('ko-KR', {
@@ -370,6 +377,7 @@ export default function App() {
   const [adminDownloadName, setAdminDownloadName] = useState('contents.md');
   const [adminPassword, setAdminPassword] = useState('');
   const [adminAuthenticated, setAdminAuthenticated] = useState(() => Boolean(getAdminSession()));
+  const [editingItemId, setEditingItemId] = useState('');
 
   useEffect(() => {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(library));
@@ -410,6 +418,11 @@ export default function App() {
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   }, [activeCategory, activeType, library, query]);
 
+  const editingItemTitle = useMemo(
+    () => library.find((row) => row.id === editingItemId)?.title || '',
+    [editingItemId, library],
+  );
+
   const toggleOpen = (id) => setOpenItems((prev) => ({ ...prev, [id]: !prev[id] }));
 
   const removeItem = (id) => {
@@ -420,6 +433,12 @@ export default function App() {
       delete next[id];
       return next;
     });
+    if (editingItemId === id) {
+      setEditingItemId('');
+      setAdminForm((prev) => ({ ...ADMIN_MODE_DEFAULT, mode: prev.mode }));
+      setAdminGenerated('');
+      setAdminMessage('수정 중이던 글이 삭제되어 편집 상태를 초기화했습니다.');
+    }
   };
 
   const buildItemAndSave = ({ id, title, category, type, source, sourceUrl, summary, tags }) => {
@@ -438,6 +457,26 @@ export default function App() {
       },
       ...prev,
     ]);
+  };
+
+  const setAdminFromItem = (item) => {
+    setEditingItemId(item.id);
+    setAdminForm({
+      ...ADMIN_MODE_DEFAULT,
+      mode: item.type,
+      category: item.category || 'ai',
+      title: item.title || '',
+      sourceUrl: item.sourceUrl || '',
+      source: item.source || '',
+      author: item.type === 'article' ? extractMetaLine(item.summary, '저자') : '',
+      tags: Array.isArray(item.tags) ? item.tags.join(', ') : '',
+      summary: item.summary || '',
+      fileName: safeFileName(item.title || 'content'),
+    });
+    setAdminGenerated(item.summary || '');
+    setAdminDownloadName(safeFileName(item.title || 'content'));
+    setAdminMessage(`"${item.title}" 수정 모드로 불러왔습니다.`);
+    setViewMode('admin');
   };
 
   const downloadMarkdown = () => {
@@ -463,6 +502,7 @@ export default function App() {
     setAdminGenerated('');
     setAdminMessage('');
     setAdminDownloadName('contents.md');
+    setEditingItemId('');
   };
 
   const handleAdminField = (event) => {
@@ -624,48 +664,57 @@ export default function App() {
       return;
     }
 
-    let entry;
-    if (adminForm.mode === 'article') {
-      entry = {
-        id: `admin-${Date.now()}`,
-        title: adminForm.title.trim() || '해외 article',
-        category: adminForm.category,
-        type: 'article',
-        source: adminForm.source || '해외 article',
-        sourceUrl: normalizeUrl(adminForm.sourceUrl),
-        summary: adminGenerated,
-        tags: parseTags(adminForm.tags),
-      };
-    } else if (adminForm.mode === 'naver') {
-      entry = {
-        id: `admin-${Date.now()}`,
-        title: adminForm.title.trim() || '국내 article',
-        category: adminForm.category,
-        type: 'naver',
-        source: adminForm.source || '국내 article',
-        sourceUrl: normalizeUrl(adminForm.sourceUrl),
-        summary: adminGenerated,
-        tags: parseTags(adminForm.tags),
-      };
-    } else {
-      if (!adminForm.sourceUrl.trim()) {
-        setAdminMessage('유튜브는 링크 입력과 .md 생성이 필요합니다.');
-        return;
+    const normalizedSourceUrl = normalizeUrl(adminForm.sourceUrl);
+    const commonTags = parseTags(adminForm.tags);
+
+    const entry = (() => {
+      if (adminForm.mode === 'article') {
+        return {
+          type: 'article',
+          title: adminForm.title.trim() || '해외 article',
+          category: adminForm.category,
+          source: adminForm.source.trim() || '해외 article',
+          sourceUrl: normalizedSourceUrl,
+          summary: adminGenerated,
+          tags: commonTags,
+        };
       }
-      entry = {
-        id: `admin-${Date.now()}`,
+
+      if (adminForm.mode === 'naver') {
+        return {
+          type: 'naver',
+          title: adminForm.title.trim() || '국내 article',
+          category: adminForm.category,
+          source: adminForm.source.trim() || '국내 article',
+          sourceUrl: normalizedSourceUrl,
+          summary: adminGenerated,
+          tags: commonTags,
+        };
+      }
+
+      if (!normalizedSourceUrl) {
+        setAdminMessage('유튜브는 링크 입력과 .md 생성이 필요합니다.');
+        return null;
+      }
+
+      return {
+        type: 'youtube',
         title: adminForm.title.trim() || '유튜브 요약',
         category: adminForm.category,
-        type: 'youtube',
-        source: adminForm.source || 'YouTube',
-        sourceUrl: normalizeUrl(adminForm.sourceUrl),
+        source: adminForm.source.trim() || 'YouTube',
+        sourceUrl: normalizedSourceUrl,
         summary: buildYoutubeMarkdown({
-          sourceUrl: normalizeUrl(adminForm.sourceUrl),
+          sourceUrl: normalizedSourceUrl,
           sourceName: adminForm.source,
           markdown: adminGenerated,
         }),
-        tags: parseTags(adminForm.tags),
+        tags: commonTags,
       };
+    })();
+
+    if (!entry) {
+      setAdminMessage('유튜브는 링크 입력과 .md 생성이 필요합니다.');
+      return;
     }
 
     if (!entry.sourceUrl) {
@@ -675,23 +724,62 @@ export default function App() {
 
     setAdminBusy(true);
     try {
-      buildItemAndSave({
-        id: entry.id,
-        title: entry.title,
-        category: entry.category,
-        type: entry.type,
-        source: entry.source,
-        sourceUrl: entry.sourceUrl,
-        summary: entry.summary,
-        tags: entry.tags,
-      });
-      setAdminMessage('콘텐츠가 라이브러리에 저장되었습니다.');
+      const isUpdate = Boolean(editingItemId);
+      if (isUpdate) {
+        setLibrary((prev) => {
+          const found = prev.some((item) => item.id === editingItemId);
+          if (!found) {
+            const fallback = `admin-${Date.now()}`;
+            return [
+              {
+                id: fallback,
+                title: entry.title.trim(),
+                category: entry.category,
+                type: entry.type,
+                source: entry.source.trim() || entry.sourceUrl || '미지정',
+                sourceUrl: entry.sourceUrl.trim(),
+                summary: entry.summary.trim(),
+                tags: entry.tags || [],
+                createdAt: new Date().toISOString(),
+              },
+              ...prev,
+            ];
+          }
+          return prev.map((item) => {
+            if (item.id !== editingItemId) return item;
+            return {
+              ...item,
+              title: entry.title.trim(),
+              category: entry.category,
+              type: entry.type,
+              source: entry.source.trim() || entry.sourceUrl || '미지정',
+              sourceUrl: entry.sourceUrl.trim(),
+              summary: entry.summary.trim(),
+              tags: entry.tags || [],
+            };
+          });
+        });
+        setAdminMessage('콘텐츠가 수정되었습니다.');
+        setEditingItemId('');
+      } else {
+        buildItemAndSave({
+          id: `admin-${Date.now()}`,
+          title: entry.title,
+          category: entry.category,
+          type: entry.type,
+          source: entry.source,
+          sourceUrl: entry.sourceUrl,
+          summary: entry.summary,
+          tags: entry.tags,
+        });
+        setAdminMessage('콘텐츠가 라이브러리에 저장되었습니다.');
+      }
 
       if (AUTO_GITHUB_PUBLISH) {
         try {
           const result = await publishMarkdownToGitHub(entry, entry.summary);
           if (result?.commit) {
-            setAdminMessage('콘텐츠 저장 + GitHub 커밋 완료.');
+            setAdminMessage(isUpdate ? '콘텐츠 수정 + GitHub 커밋 완료.' : '콘텐츠 저장 + GitHub 커밋 완료.');
           } else {
             setAdminMessage('콘텐츠 저장 완료. GitHub 자동 업로드는 비활성입니다.');
           }
@@ -851,6 +939,9 @@ export default function App() {
                         <button type="button" className="btn" onClick={() => toggleOpen(item.id)}>
                           {isOpen ? '닫기' : '마크다운 열기'}
                         </button>
+                        <button type="button" className="btn ghost" onClick={() => setAdminFromItem(item)}>
+                          수정
+                        </button>
                         {item.sourceUrl ? (
                           <a className="btn ghost" href={item.sourceUrl} target="_blank" rel="noopener noreferrer">
                             원문 열기
@@ -891,7 +982,9 @@ export default function App() {
           </div>
           {adminAuthenticated ? (
             <>
-              <p className="muted">타입을 선택하고 조건에 맞게 업로드하면 `.md`를 자동 생성/다운로드할 수 있습니다.</p>
+              <p className="muted">
+                {editingItemId ? `"${editingItemTitle}" 수정 중입니다.` : '타입을 선택하고 조건에 맞게 업로드하면 `.md`를 자동 생성/다운로드할 수 있습니다.'}
+              </p>
 
               <div className="admin-mode-switch">
                 {TYPE_OPTIONS.map((mode) => {
@@ -901,12 +994,7 @@ export default function App() {
                       key={mode.id}
                       type="button"
                       className={`chip ${active ? 'is-active' : ''}`}
-                      onClick={() => {
-                        setAdminForm((prev) => ({ ...ADMIN_MODE_DEFAULT, mode: mode.id, category: prev.category || 'ai' }));
-                        setAdminGenerated('');
-                        setAdminMessage('');
-                        setAdminDownloadName('contents.md');
-                      }}
+                      onClick={() => handleAdminMode(mode.id)}
                     >
                       {mode.label}
                       <span className="admin-mode-note">{mode.description}</span>
@@ -1083,7 +1171,7 @@ export default function App() {
                       onClick={handleSaveAdmin}
                       disabled={adminBusy || !adminGenerated}
                     >
-                      저장만
+                      {editingItemId ? '수정 저장' : '저장만'}
                     </button>
                 <button
                   type="button"
