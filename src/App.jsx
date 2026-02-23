@@ -374,6 +374,41 @@ const normalizeUrl = (url) => {
   return /^https?:\/\//i.test(value) ? value : `https://${value}`;
 };
 
+const extractYoutubeVideoId = (url) => {
+  const normalized = normalizeUrl(url);
+  if (!normalized) return '';
+  try {
+    const parsed = new URL(normalized);
+    const host = parsed.hostname.replace(/^www\./, '');
+
+    if (host === 'youtu.be') {
+      const id = parsed.pathname.replace(/^\//, '').split('/')[0];
+      if (id) return id;
+    }
+
+    if (host.includes('youtube.com')) {
+      if (parsed.pathname === '/watch') {
+        const queryId = parsed.searchParams.get('v');
+        if (queryId) return queryId;
+      }
+
+      const segments = parsed.pathname.split('/').filter(Boolean);
+      if (segments[0] === 'embed' && segments[1]) return segments[1];
+      if (segments[0] === 'shorts' && segments[1]) return segments[1];
+    }
+  } catch {
+    return '';
+  }
+
+  return '';
+};
+
+const getYoutubeEmbedUrl = (url) => {
+  const id = extractYoutubeVideoId(url);
+  if (!id) return '';
+  return `https://www.youtube.com/embed/${encodeURIComponent(id)}`;
+};
+
 const safeFileName = (value) => {
   const fallback = 'george-goodreads-content';
   return `${String(value || fallback).replace(/[^a-zA-Z0-9가-힣._-]/g, '_').slice(0, 45)}.md`;
@@ -1554,6 +1589,20 @@ export default function App() {
               <p className="muted tags-row">
                 {(currentItem.tags || []).map((tag) => `#${tag}`).join(' ') || '태그 없음'}
               </p>
+              {currentItem.type === 'youtube' ? (
+                <div className="youtube-embed-wrap">
+                  {getYoutubeEmbedUrl(currentItem.sourceUrl) ? (
+                    <iframe
+                      src={getYoutubeEmbedUrl(currentItem.sourceUrl)}
+                      title={currentItem.title || '유튜브 콘텐츠'}
+                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                      allowFullScreen
+                    />
+                  ) : (
+                    <p className="muted">유튜브 링크가 유효하지 않아 영상을 불러올 수 없습니다.</p>
+                  )}
+                </div>
+              ) : null}
               <div className="markdown-block">
                 <MarkdownBlock markdown={currentItem.summary} />
               </div>
