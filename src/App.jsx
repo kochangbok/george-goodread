@@ -114,8 +114,11 @@ const decodePathParam = (value) => {
 };
 
 const parseRoute = () => {
-  const hash = typeof window !== 'undefined' ? window.location.hash || '' : '';
-  const path = hash.startsWith('#') ? hash.slice(1) : hash;
+  if (typeof window === 'undefined') return { page: 'feed', itemId: null };
+
+  const hash = window.location.hash || '';
+  const rawPath = window.location.pathname || '/';
+  const path = rawPath.length > 1 ? rawPath.replace(/\/+$/, '') : rawPath;
   if (!path || path === '/') {
     return { page: 'feed', itemId: null };
   }
@@ -129,10 +132,17 @@ const parseRoute = () => {
     return { page: 'item', itemId: decodePathParam(itemMatch[1]) };
   }
 
+  if (hash.startsWith('#/item/')) {
+    const hashItemMatch = hash.match(/^#\/item\/([^/]+)$/);
+    if (hashItemMatch?.[1]) {
+      return { page: 'item', itemId: decodePathParam(hashItemMatch[1]) };
+    }
+  }
+
   return { page: 'feed', itemId: null };
 };
 
-const itemRouteHash = (id) => `#/item/${encodeURIComponent(id || '')}`;
+const itemRoutePath = (id) => `/item/${encodeURIComponent(id || '')}`;
 
 const saveAdminSession = () => {
   try {
@@ -409,8 +419,12 @@ export default function App() {
 
   useEffect(() => {
     const syncRoute = () => setRoute(parseRoute());
+    window.addEventListener('popstate', syncRoute);
     window.addEventListener('hashchange', syncRoute);
-    return () => window.removeEventListener('hashchange', syncRoute);
+    return () => {
+      window.removeEventListener('popstate', syncRoute);
+      window.removeEventListener('hashchange', syncRoute);
+    };
   }, []);
 
   useEffect(() => {
@@ -469,15 +483,31 @@ export default function App() {
   );
 
   const goToFeed = () => {
-    window.location.hash = '';
+    if (window.location.pathname !== '/') {
+      window.history.pushState({}, '', '/');
+      setRoute(parseRoute());
+      return;
+    }
+    setRoute(parseRoute());
   };
 
   const goToAdmin = () => {
-    window.location.hash = '/admin';
+    if (window.location.pathname !== '/admin') {
+      window.history.pushState({}, '', '/admin');
+      setRoute(parseRoute());
+      return;
+    }
+    setRoute(parseRoute());
   };
 
   const goToItem = (id) => {
-    window.location.hash = itemRouteHash(id);
+    const target = itemRoutePath(id);
+    if (window.location.pathname !== target) {
+      window.history.pushState({}, '', target);
+      setRoute(parseRoute());
+      return;
+    }
+    setRoute(parseRoute());
   };
 
   const removeItem = (id) => {
