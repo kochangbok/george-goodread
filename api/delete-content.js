@@ -1,4 +1,5 @@
 import { getRepoConfig, readRepoJson, writeRepoFile } from './_github';
+import { requireAdminApiKey } from './_api-auth';
 
 const sanitizeItems = (items = []) =>
   items
@@ -21,6 +22,10 @@ const sanitizeItems = (items = []) =>
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'method_not_allowed' });
+  }
+
+  if (!requireAdminApiKey(req, res)) {
+    return;
   }
 
   const config = getRepoConfig();
