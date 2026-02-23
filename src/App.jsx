@@ -680,7 +680,19 @@ export default function App() {
     URL.revokeObjectURL(href);
   };
 
-  const resetAdminForm = (mode = adminForm.mode) => {
+  const resetAdminForm = (mode = adminForm.mode, options = {}) => {
+    const keepEditingState = !!options.keepEditingState;
+
+    if (keepEditingState && editingItemId) {
+      setAdminForm((prev) => ({
+        ...prev,
+        mode,
+        category: prev.category || 'ai',
+      }));
+      setAdminMessage(`편집 중인 콘텐츠의 타입을 "${TYPE_OPTIONS.find((entry) => entry.id === mode)?.label ?? '타입'}"으로(로) 변경했습니다.`);
+      return;
+    }
+
     const nextCategory = mode === 'article' ? adminForm.category : adminForm.category || 'ai';
     setAdminForm({
       ...ADMIN_MODE_DEFAULT,
@@ -699,6 +711,11 @@ export default function App() {
   };
 
   const handleAdminMode = (mode) => {
+    if (editingItemId) {
+      resetAdminForm(mode, { keepEditingState: true });
+      return;
+    }
+
     resetAdminForm(mode);
   };
 
