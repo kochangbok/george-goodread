@@ -105,6 +105,35 @@ const getAdminSession = () => {
   }
 };
 
+const decodePathParam = (value) => {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+};
+
+const parseRoute = () => {
+  const hash = typeof window !== 'undefined' ? window.location.hash || '' : '';
+  const path = hash.startsWith('#') ? hash.slice(1) : hash;
+  if (!path || path === '/') {
+    return { page: 'feed', itemId: null };
+  }
+
+  if (path === '/admin') {
+    return { page: 'admin', itemId: null };
+  }
+
+  const itemMatch = path.match(/^\/item\/([^/]+)$/);
+  if (itemMatch?.[1]) {
+    return { page: 'item', itemId: decodePathParam(itemMatch[1]) };
+  }
+
+  return { page: 'feed', itemId: null };
+};
+
+const itemRouteHash = (id) => `#/item/${encodeURIComponent(id || '')}`;
+
 const saveAdminSession = () => {
   try {
     window.localStorage.setItem(
@@ -365,7 +394,7 @@ export default function App() {
     }
   });
 
-  const [viewMode, setViewMode] = useState('feed');
+  const [route, setRoute] = useState(() => parseRoute());
   const [activeCategory, setActiveCategory] = useState('all');
   const [activeType, setActiveType] = useState('all');
   const [query, setQuery] = useState('');
@@ -378,6 +407,12 @@ export default function App() {
   const [adminPassword, setAdminPassword] = useState('');
   const [adminAuthenticated, setAdminAuthenticated] = useState(() => Boolean(getAdminSession()));
   const [editingItemId, setEditingItemId] = useState('');
+
+  useEffect(() => {
+    const syncRoute = () => setRoute(parseRoute());
+    window.addEventListener('hashchange', syncRoute);
+    return () => window.removeEventListener('hashchange', syncRoute);
+  }, []);
 
   useEffect(() => {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(library));
@@ -423,6 +458,23 @@ export default function App() {
     [editingItemId, library],
   );
 
+  const currentItem = useMemo(
+    () => library.find((row) => route.page === 'item' && row.id === route.itemId) || null,
+    [library, route],
+  );
+
+  const goToFeed = () => {
+    window.location.hash = '';
+  };
+
+  const goToAdmin = () => {
+    window.location.hash = '/admin';
+  };
+
+  const goToItem = (id) => {
+    window.location.hash = itemRouteHash(id);
+  };
+
   const toggleOpen = (id) => setOpenItems((prev) => ({ ...prev, [id]: !prev[id] }));
 
   const removeItem = (id) => {
@@ -438,6 +490,9 @@ export default function App() {
       setAdminForm((prev) => ({ ...ADMIN_MODE_DEFAULT, mode: prev.mode }));
       setAdminGenerated('');
       setAdminMessage('수정 중이던 글이 삭제되어 편집 상태를 초기화했습니다.');
+    }
+    if (route.page === 'item' && route.itemId === id) {
+      goToFeed();
     }
   };
 
@@ -476,7 +531,7 @@ export default function App() {
     setAdminGenerated(item.summary || '');
     setAdminDownloadName(safeFileName(item.title || 'content'));
     setAdminMessage(`"${item.title}" 수정 모드로 불러왔습니다.`);
-    setViewMode('admin');
+    goToAdmin();
   };
 
   const downloadMarkdown = () => {
@@ -817,15 +872,15 @@ export default function App() {
         <div className="view-switch" role="tablist" aria-label="뷰 전환">
           <button
             type="button"
-            className={`chip ${viewMode === 'feed' ? 'is-active' : ''}`}
-            onClick={() => setViewMode('feed')}
+            className={`chip ${route.page === 'admin' ? '' : 'is-active'}`}
+            onClick={goToFeed}
           >
             콘텐츠 뷰
           </button>
           <button
             type="button"
-            className={`chip ${viewMode === 'admin' ? 'is-active' : ''}`}
-            onClick={() => setViewMode('admin')}
+            className={`chip ${route.page === 'admin' ? 'is-active' : ''}`}
+            onClick={goToAdmin}
           >
             관리자 업로드
           </button>
@@ -833,6 +888,7 @@ export default function App() {
       </header>
 
       <section className="panel controls">
+        {route.page === 'item' ? null : (
         <div className="control-row">
           <label htmlFor="query-input">검색</label>
           <input
@@ -889,88 +945,10 @@ export default function App() {
             })}
           </div>
         </div>
+        )}
       </section>
 
-      {viewMode === 'feed' ? (
-        <main className="content-layout">
-          <section className="panel feed-panel">
-            <div className="feed-head">
-              <h2>보관 중인 콘텐츠</h2>
-              <p className="muted">
-                {filteredItems.length}개
-                {activeCategory !== 'all' && ` · ${FILTER_CATEGORIES.find((c) => c.id === activeCategory)?.label}`}
-                {activeType !== 'all' && ` · ${TYPE_OPTIONS.find((t) => t.id === activeType)?.label}`}
-                {query && ` · 검색: ${query}`}
-              </p>
-            </div>
-            {filteredItems.length === 0 ? (
-              <p className="muted empty-text">조건에 맞는 항목이 없습니다.</p>
-            ) : (
-              <div className="card-stack">
-                {filteredItems.map((item) => {
-                  const type = TYPE_OPTIONS.find((entry) => entry.id === item.type) ?? TYPE_OPTIONS[0];
-                  const category = CATEGORY_OPTIONS.find((entry) => entry.id === item.category)?.label ?? '기타';
-                  const isOpen = !!openItems[item.id];
-                  return (
-                    <article key={item.id} className="item-card">
-                      <div className="item-head">
-                        <span className="type-chip" style={{ borderColor: type.color }}>
-                          <span>{type.icon}</span>
-                          {type.label}
-                        </span>
-                        <span className="item-date">{formatDate(item.createdAt)}</span>
-                      </div>
-                      <h3>{item.title}</h3>
-                      <div className="item-meta">
-                        <span className="meta-pill">{category}</span>
-                        <span className="muted">출처: {item.source || '미지정'}</span>
-                      </div>
-                      <p className="excerpt">
-                        {isOpen ? (
-                          <MarkdownBlock markdown={item.summary} />
-                        ) : (
-                          truncate(item.summary, 180)
-                        )}
-                      </p>
-                      <p className="muted tags-row">
-                        {item.tags.map((tag) => `#${tag}`).join(' ') || '태그 없음'}
-                      </p>
-                      <div className="item-actions">
-                        <button type="button" className="btn" onClick={() => toggleOpen(item.id)}>
-                          {isOpen ? '닫기' : '마크다운 열기'}
-                        </button>
-                        <button type="button" className="btn ghost" onClick={() => setAdminFromItem(item)}>
-                          수정
-                        </button>
-                        {item.sourceUrl ? (
-                          <a className="btn ghost" href={item.sourceUrl} target="_blank" rel="noopener noreferrer">
-                            원문 열기
-                          </a>
-                        ) : null}
-                        <button type="button" className="btn danger" onClick={() => removeItem(item.id)}>
-                          삭제
-                        </button>
-                      </div>
-                    </article>
-                  );
-                })}
-              </div>
-            )}
-          </section>
-          <aside className="panel composer">
-            <h2>업로드 가이드</h2>
-            <p className="muted">관리자 페이지에서 타입별로 업로드하세요.</p>
-            <div className="md-guide">
-              <p className="md-guide-title">해외 article</p>
-              <p>원문 링크 + 번역본 md 붙여넣기 또는 업로드</p>
-              <p className="md-guide-title">국내 article</p>
-              <p>요약 + 리다이렉트 링크만 등록</p>
-              <p className="md-guide-title">유튜브</p>
-              <p>요약 `.md` 파일을 업로드</p>
-            </div>
-          </aside>
-        </main>
-      ) : (
+      {route.page === 'admin' ? (
         <section className="panel admin-panel">
           <div className="admin-head-row">
             <h2>콘텐츠 업로드 관리자</h2>
@@ -1253,6 +1231,136 @@ export default function App() {
           {adminMessage ? <p className="muted status">{adminMessage}</p> : null}
           {adminBusy ? <p className="muted">작업 중...</p> : null}
         </section>
+      ) : route.page === 'item' ? (
+        <section className="panel">
+          <div className="feed-head">
+            <h2>콘텐츠 상세</h2>
+            <button type="button" className="btn" onClick={goToFeed}>
+              목록으로
+            </button>
+          </div>
+          {!currentItem ? (
+            <p className="muted">요청한 콘텐츠를 찾을 수 없습니다.</p>
+          ) : (
+            <article className="item-card">
+              <div className="item-head">
+                <span className="type-chip" style={{ borderColor: (TYPE_OPTIONS.find((entry) => entry.id === currentItem.type) ?? TYPE_OPTIONS[0]).color }}>
+                  <span>{(TYPE_OPTIONS.find((entry) => entry.id === currentItem.type) ?? TYPE_OPTIONS[0]).icon}</span>
+                  {(TYPE_OPTIONS.find((entry) => entry.id === currentItem.type) ?? TYPE_OPTIONS[0]).label}
+                </span>
+                <span className="item-date">{formatDate(currentItem.createdAt)}</span>
+              </div>
+              <h3>{currentItem.title}</h3>
+              <div className="item-meta">
+                <span className="meta-pill">
+                  {CATEGORY_OPTIONS.find((entry) => entry.id === currentItem.category)?.label ?? '기타'}
+                </span>
+                <span className="muted">출처: {currentItem.source || '미지정'}</span>
+              </div>
+              <p className="muted tags-row">
+                {(currentItem.tags || []).map((tag) => `#${tag}`).join(' ') || '태그 없음'}
+              </p>
+              <div className="markdown-block">
+                <MarkdownBlock markdown={currentItem.summary} />
+              </div>
+              <div className="item-actions">
+                <button type="button" className="btn ghost" onClick={() => setAdminFromItem(currentItem)}>
+                  수정
+                </button>
+                {currentItem.sourceUrl ? (
+                  <a className="btn ghost" href={currentItem.sourceUrl} target="_blank" rel="noopener noreferrer">
+                    원문 열기
+                  </a>
+                ) : null}
+                <button type="button" className="btn danger" onClick={() => removeItem(currentItem.id)}>
+                  삭제
+                </button>
+              </div>
+            </article>
+          )}
+        </section>
+      ) : (
+        <main className="content-layout">
+          <section className="panel feed-panel">
+            <div className="feed-head">
+              <h2>보관 중인 콘텐츠</h2>
+              <p className="muted">
+                {filteredItems.length}개
+                {activeCategory !== 'all' && ` · ${FILTER_CATEGORIES.find((c) => c.id === activeCategory)?.label}`}
+                {activeType !== 'all' && ` · ${TYPE_OPTIONS.find((t) => t.id === activeType)?.label}`}
+                {query && ` · 검색: ${query}`}
+              </p>
+            </div>
+            {filteredItems.length === 0 ? (
+              <p className="muted empty-text">조건에 맞는 항목이 없습니다.</p>
+            ) : (
+              <div className="card-stack">
+                {filteredItems.map((item) => {
+                  const type = TYPE_OPTIONS.find((entry) => entry.id === item.type) ?? TYPE_OPTIONS[0];
+                  const category = CATEGORY_OPTIONS.find((entry) => entry.id === item.category)?.label ?? '기타';
+                  const isOpen = !!openItems[item.id];
+                  return (
+                    <article key={item.id} className="item-card">
+                      <div className="item-head">
+                        <span className="type-chip" style={{ borderColor: type.color }}>
+                          <span>{type.icon}</span>
+                          {type.label}
+                        </span>
+                        <span className="item-date">{formatDate(item.createdAt)}</span>
+                      </div>
+                      <h3>{item.title}</h3>
+                      <div className="item-meta">
+                        <span className="meta-pill">{category}</span>
+                        <span className="muted">출처: {item.source || '미지정'}</span>
+                      </div>
+                      <p className="excerpt">
+                        {isOpen ? (
+                          <MarkdownBlock markdown={item.summary} />
+                        ) : (
+                          truncate(item.summary, 180)
+                        )}
+                      </p>
+                      <p className="muted tags-row">
+                        {item.tags.map((tag) => `#${tag}`).join(' ') || '태그 없음'}
+                      </p>
+                      <div className="item-actions">
+                        <button type="button" className="btn" onClick={() => goToItem(item.id)}>
+                          상세 보기
+                        </button>
+                        <button type="button" className="btn ghost" onClick={() => toggleOpen(item.id)}>
+                          {isOpen ? '닫기' : '마크다운 열기'}
+                        </button>
+                        <button type="button" className="btn ghost" onClick={() => setAdminFromItem(item)}>
+                          수정
+                        </button>
+                        {item.sourceUrl ? (
+                          <a className="btn ghost" href={item.sourceUrl} target="_blank" rel="noopener noreferrer">
+                            원문 열기
+                          </a>
+                        ) : null}
+                        <button type="button" className="btn danger" onClick={() => removeItem(item.id)}>
+                          삭제
+                        </button>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+          <aside className="panel composer">
+            <h2>업로드 가이드</h2>
+            <p className="muted">관리자 페이지에서 타입별로 업로드하세요.</p>
+            <div className="md-guide">
+              <p className="md-guide-title">해외 article</p>
+              <p>원문 링크 + 번역본 md 붙여넣기 또는 업로드</p>
+              <p className="md-guide-title">국내 article</p>
+              <p>요약 + 리다이렉트 링크만 등록</p>
+              <p className="md-guide-title">유튜브</p>
+              <p>요약 `.md` 파일을 업로드</p>
+            </div>
+          </aside>
+        </main>
       )}
     </div>
   );
