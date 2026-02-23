@@ -116,7 +116,6 @@ const decodePathParam = (value) => {
 const parseRoute = () => {
   if (typeof window === 'undefined') return { page: 'feed', itemId: null };
 
-  const hash = window.location.hash || '';
   const rawPath = window.location.pathname || '/';
   const path = rawPath.length > 1 ? rawPath.replace(/\/+$/, '') : rawPath;
   if (!path || path === '/') {
@@ -130,13 +129,6 @@ const parseRoute = () => {
   const itemMatch = path.match(/^\/item\/([^/]+)$/);
   if (itemMatch?.[1]) {
     return { page: 'item', itemId: decodePathParam(itemMatch[1]) };
-  }
-
-  if (hash.startsWith('#/item/')) {
-    const hashItemMatch = hash.match(/^#\/item\/([^/]+)$/);
-    if (hashItemMatch?.[1]) {
-      return { page: 'item', itemId: decodePathParam(hashItemMatch[1]) };
-    }
   }
 
   return { page: 'feed', itemId: null };
@@ -420,10 +412,8 @@ export default function App() {
   useEffect(() => {
     const syncRoute = () => setRoute(parseRoute());
     window.addEventListener('popstate', syncRoute);
-    window.addEventListener('hashchange', syncRoute);
     return () => {
       window.removeEventListener('popstate', syncRoute);
-      window.removeEventListener('hashchange', syncRoute);
     };
   }, []);
 
@@ -1352,7 +1342,19 @@ export default function App() {
                   const type = TYPE_OPTIONS.find((entry) => entry.id === item.type) ?? TYPE_OPTIONS[0];
                   const category = CATEGORY_OPTIONS.find((entry) => entry.id === item.category)?.label ?? '기타';
                   return (
-                    <article key={item.id} className="item-card">
+                    <article
+                      key={item.id}
+                      className="item-card"
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => goToItem(item.id)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault();
+                          goToItem(item.id);
+                        }
+                      }}
+                    >
                       <div className="item-head">
                         <span className="type-chip" style={{ borderColor: type.color }}>
                           <span>{type.icon}</span>
@@ -1371,11 +1373,6 @@ export default function App() {
                       <p className="muted tags-row">
                         {item.tags.map((tag) => `#${tag}`).join(' ') || '태그 없음'}
                       </p>
-                      <div className="item-actions">
-                        <button type="button" className="btn" onClick={() => goToItem(item.id)}>
-                          전문 읽기
-                        </button>
-                      </div>
                     </article>
                   );
                 })}
