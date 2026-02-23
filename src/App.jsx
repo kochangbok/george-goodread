@@ -253,12 +253,36 @@ const escapeHtml = (value) =>
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 
+const linkifyText = (value) =>
+  String(value).replace(
+    /\b(https?:\/\/[^\s<>"')\]}]+|www\.[^\s<>"')\]}]+)/g,
+    (match) => {
+      const hasProtocol = /^https?:\/\//i.test(match);
+      const url = hasProtocol ? match : `https://${match}`;
+      const trailMatch = match.match(/[.,!?;:}\])]+$/);
+      if (!trailMatch) {
+        return `<a href="${url}" target="_blank" rel="noopener noreferrer">${match}</a>`;
+      }
+
+      const trailing = trailMatch[0];
+      const plain = match.slice(0, match.length - trailing.length);
+      const plainUrl = hasProtocol ? plain : `https://${plain}`;
+      return `<a href="${plainUrl}" target="_blank" rel="noopener noreferrer">${plain}</a>${trailing}`;
+    },
+  );
+
 const applyInlineMarkdown = (value) => {
-  return value
+  const source = escapeHtml(value || '');
+  const withBasicMarkup = source
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
     .replace(/\*(.*?)\*/g, '<em>$1</em>')
     .replace(/\[(.+?)\]\((.+?)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+
+  const safeParts = withBasicMarkup.split(/(<a\b[^>]*>[\s\S]*?<\/a>|<code>[\s\S]*?<\/code>)/gi);
+  return safeParts
+    .map((part, index) => (index % 2 === 0 ? linkifyText(part) : part))
+    .join('');
 };
 
 const markdownToHtml = (markdown) => {
