@@ -116,9 +116,11 @@ export default async function handler(req, res) {
   }
 
   try {
-    const indexData = (await readRepoJson({ filePath: 'content/index.json', fallback: { items: [] }, branch: config.branch })) || {
+    const indexFilePath = 'content/index.json';
+    const indexData = (await readRepoJson({ filePath: indexFilePath, fallback: { items: [] }, branch: config.branch })) || {
       items: [],
     };
+    const existingIndexFile = await readRepoFile({ filePath: indexFilePath, branch: config.branch }).catch(() => null);
     const originList = Array.isArray(indexData?.items) ? indexData.items : [];
     const prev = sanitizeItems(originList);
     const body = req.body || {};
@@ -154,10 +156,11 @@ export default async function handler(req, res) {
     });
 
     const indexResult = await writeRepoFile({
-      filePath: 'content/index.json',
+      filePath: indexFilePath,
       content: JSON.stringify({ items: withUpdated }, null, 2),
       message: `update index: ${item.id}`.slice(0, 72),
       branch: config.branch,
+      ...(existingIndexFile?.sha ? { sha: existingIndexFile.sha } : {}),
     });
 
     return res.status(200).json({

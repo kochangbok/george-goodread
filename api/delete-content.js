@@ -1,4 +1,4 @@
-import { getRepoConfig, readRepoJson, writeRepoFile } from './_github.js';
+import { getRepoConfig, readRepoJson, readRepoFile, writeRepoFile } from './_github.js';
 import { requireAdminApiKey } from './_api-auth.js';
 
 const sanitizeItems = (items = []) =>
@@ -48,11 +48,15 @@ export default async function handler(req, res) {
     }
 
     const next = current.filter((entry) => String(entry.id) !== targetId);
+    const indexFilePath = 'content/index.json';
+    const existingIndexFile = await readRepoFile({ filePath: indexFilePath, branch: config.branch }).catch(() => null);
+
     await writeRepoFile({
-      filePath: 'content/index.json',
+      filePath: indexFilePath,
       content: JSON.stringify({ items: next }, null, 2),
       message: `delete item: ${targetId}`.slice(0, 72),
       branch: config.branch,
+      ...(existingIndexFile?.sha ? { sha: existingIndexFile.sha } : {}),
     });
 
     return res.status(200).json({ id: targetId, removed });
