@@ -5,7 +5,7 @@ const ADMIN_SESSION_KEY = 'georges-goodreads-admin-session-v1';
 const ADMIN_SESSION_TTL_MS = 3 * 60 * 60 * 1000;
 const ADMIN_PASSWORD = import.meta.env.VITE_ADMIN_PASSWORD || 'spark365';
 const DEFAULT_AUTHOR = '미지정';
-const AUTO_GITHUB_PUBLISH = (import.meta.env.VITE_AUTO_GITHUB_PUBLISH || 'false').toLowerCase() === 'true';
+const USE_GITHUB_LIBRARY = (import.meta.env.VITE_USE_GITHUB_LIBRARY || 'true').toLowerCase() !== 'false';
 
 const CATEGORY_OPTIONS = [
   { id: 'ai', label: 'ai, 바이브코딩' },
@@ -118,6 +118,14 @@ const parseRoute = () => {
 
   const rawPath = window.location.pathname || '/';
   const path = rawPath.length > 1 ? rawPath.replace(/\/+$/, '') : rawPath;
+
+  if (!path || path === '/') {
+    const hash = window.location.hash || '';
+    const hashMatch = hash.match(/^#\/item\/([^/]+)$/);
+    if (hashMatch?.[1]) {
+      return { page: 'item', itemId: decodePathParam(hashMatch[1]) };
+    }
+  }
   if (!path || path === '/') {
     return { page: 'feed', itemId: null };
   }
@@ -367,7 +375,7 @@ const buildGitHubPath = (title, sourceUrl) => {
 };
 
 const publishToGitHub = async (payload) => {
-  const response = await fetch('/api/publish-content', {
+  const response = await fetch('/api/save-content', {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
@@ -383,6 +391,63 @@ const publishToGitHub = async (payload) => {
   return body;
 };
 
+const deleteFromGitHub = async (id) => {
+  const response = await fetch('/api/delete-content', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ id }),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body?.error || 'GitHub 삭제 실패');
+  }
+  return body;
+};
+
+const loadLibraryFromGitHub = async () => {
+  const response = await fetch('/api/load-library', {
+    method: 'GET',
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body?.error || '목록 불러오기 실패');
+  }
+  return body?.items || [];
+};
+
+const loadCommentsFromGitHub = async (itemId) => {
+  const response = await fetch(`/api/load-comments?itemId=${encodeURIComponent(itemId)}`, {
+    method: 'GET',
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body?.error || '댓글 불러오기 실패');
+  }
+  return body?.comments || [];
+};
+
+const submitCommentToGitHub = async ({ itemId, name, message, password }) => {
+  const response = await fetch('/api/add-comment', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      itemId,
+      name,
+      message,
+      password,
+    }),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body?.error || '댓글 작성 실패');
+  }
+  return body?.comments || [];
+};
+
 export default function App() {
   const [library, setLibrary] = useState(() => {
     try {
@@ -395,6 +460,17 @@ export default function App() {
       return seedLibrary;
     }
   });
+  const [libraryLoading, setLibraryLoading] = useState(true);
+  const [libraryError, setLibraryError] = useState('');
+  const [comments, setComments] = useState([]);
+  const [commentForm, setCommentForm] = useState({
+    name: '',
+    message: '',
+    password: '',
+  });
+  const [commentLoading, setCommentLoading] = useState(false);
+  const [commentBusy, setCommentBusy] = useState(false);
+  const [commentMessage, setCommentMessage] = useState('');
 
   const [route, setRoute] = useState(() => parseRoute());
   const [activeCategory, setActiveCategory] = useState('all');
@@ -415,6 +491,29 @@ export default function App() {
     return () => {
       window.removeEventListener('popstate', syncRoute);
     };
+  }, []);
+
+  useEffect(() => {
+    if (!USE_GITHUB_LIBRARY) {
+      setLibraryLoading(false);
+      return;
+    }
+
+    const loadLibrary = async () => {
+      try {
+        setLibraryLoading(true);
+        const items = await loadLibraryFromGitHub();
+        setLibrary(items.length ? items : []);
+        setLibraryError('');
+      } catch (error) {
+        console.error(error);
+        setLibraryError('GitHub 라이브러리 불러오기에 실패해 로컬 저장 목록을 사용합니다.');
+      } finally {
+        setLibraryLoading(false);
+      }
+    };
+
+    loadLibrary();
   }, []);
 
   useEffect(() => {
@@ -500,36 +599,34 @@ export default function App() {
     setRoute(parseRoute());
   };
 
-  const removeItem = (id) => {
+  const removeItem = async (id) => {
     if (!window.confirm('정말 삭제할까요?')) return;
-    setLibrary((prev) => prev.filter((item) => item.id !== id));
-    if (editingItemId === id) {
-      setEditingItemId('');
-      setAdminForm((prev) => ({ ...ADMIN_MODE_DEFAULT, mode: prev.mode }));
-      setAdminGenerated('');
-      setAdminMessage('수정 중이던 글이 삭제되어 편집 상태를 초기화했습니다.');
+    setAdminBusy(true);
+    try {
+      if (USE_GITHUB_LIBRARY) {
+        await deleteFromGitHub(id);
+      }
+      setLibrary((prev) => prev.filter((item) => item.id !== id));
+      if (editingItemId === id) {
+        setEditingItemId('');
+        setAdminForm((prev) => ({ ...ADMIN_MODE_DEFAULT, mode: prev.mode }));
+        setAdminGenerated('');
+        setAdminMessage('수정 중이던 글이 삭제되어 편집 상태를 초기화했습니다.');
+      }
+      if (route.page === 'item' && route.itemId === id) {
+        goToFeed();
+      }
+      if (USE_GITHUB_LIBRARY) {
+        setAdminMessage('GitHub에서 삭제가 반영되었습니다.');
+      } else {
+        setAdminMessage('로컬에서 삭제되었습니다.');
+      }
+    } catch (error) {
+      console.error(error);
+      setAdminMessage(`삭제 중 오류가 발생했습니다: ${error.message}`);
+    } finally {
+      setAdminBusy(false);
     }
-    if (route.page === 'item' && route.itemId === id) {
-      goToFeed();
-    }
-  };
-
-  const buildItemAndSave = ({ id, title, category, type, source, sourceUrl, summary, tags }) => {
-    if (!title.trim() || !summary.trim()) return;
-    setLibrary((prev) => [
-      {
-        id,
-        title: title.trim(),
-        category,
-        type,
-        source: source.trim() || sourceUrl || '미지정',
-        sourceUrl: sourceUrl.trim(),
-        summary: summary.trim(),
-        tags: tags || [],
-        createdAt: new Date().toISOString(),
-      },
-      ...prev,
-    ]);
   };
 
   const setAdminFromItem = (item) => {
@@ -715,20 +812,16 @@ export default function App() {
     }
   };
 
-  const publishMarkdownToGitHub = async (entry, markdownText) => {
-    if (!AUTO_GITHUB_PUBLISH) return null;
-    const filePath = buildGitHubPath(entry.title, entry.sourceUrl || entry.source);
-    const payload = {
-      filePath,
-      content: markdownText,
-      commitMessage: `${entry.type}: ${entry.title}`,
-      branch: import.meta.env.VITE_GITHUB_BRANCH || 'main',
-      tags: entry.tags || [],
-      category: entry.category,
-      source: entry.source,
-      sourceUrl: entry.sourceUrl,
+  const buildUpsertPayload = (entry, markdownText) => {
+    return {
+      item: {
+        ...entry,
+        id: entry.id || `admin-${Date.now()}`,
+        summary: markdownText,
+        filePath: entry.filePath || buildGitHubPath(entry.title, entry.sourceUrl || entry.source),
+      },
+      markdown: markdownText,
     };
-    return publishToGitHub(payload);
   };
 
   const handleSaveAdmin = async () => {
@@ -739,8 +832,10 @@ export default function App() {
 
     const normalizedSourceUrl = normalizeUrl(adminForm.sourceUrl);
     const commonTags = parseTags(adminForm.tags);
+    const now = new Date().toISOString();
+    const current = library.find((item) => item.id === editingItemId);
 
-    const entry = (() => {
+    const draft = (() => {
       if (adminForm.mode === 'article') {
         return {
           type: 'article',
@@ -766,7 +861,7 @@ export default function App() {
       }
 
       if (!normalizedSourceUrl) {
-        setAdminMessage('유튜브는 링크 입력과 .md 생성이 필요합니다.');
+        setAdminMessage('유튜브는 링크 입력이 필요합니다.');
         return null;
       }
 
@@ -785,82 +880,50 @@ export default function App() {
       };
     })();
 
-    if (!entry) {
-      setAdminMessage('유튜브는 링크 입력과 .md 생성이 필요합니다.');
-      return;
-    }
-
-    if (!entry.sourceUrl) {
+    if (!draft) return;
+    if (!draft.sourceUrl) {
       setAdminMessage('저장할 때 링크는 필수입니다.');
       return;
     }
 
+    const isUpdate = Boolean(editingItemId);
+    const draftFilePath = current?.filePath || buildGitHubPath(draft.title, draft.sourceUrl);
+    const entry = {
+      id: editingItemId || `admin-${Date.now()}`,
+      ...draft,
+      filePath: draftFilePath,
+      createdAt: current?.createdAt || now,
+      updatedAt: now,
+    };
+
     setAdminBusy(true);
     try {
-      const isUpdate = Boolean(editingItemId);
-      if (isUpdate) {
-        setLibrary((prev) => {
-          const found = prev.some((item) => item.id === editingItemId);
-          if (!found) {
-            const fallback = `admin-${Date.now()}`;
-            return [
-              {
-                id: fallback,
-                title: entry.title.trim(),
-                category: entry.category,
-                type: entry.type,
-                source: entry.source.trim() || entry.sourceUrl || '미지정',
-                sourceUrl: entry.sourceUrl.trim(),
-                summary: entry.summary.trim(),
-                tags: entry.tags || [],
-                createdAt: new Date().toISOString(),
-              },
-              ...prev,
-            ];
-          }
-          return prev.map((item) => {
-            if (item.id !== editingItemId) return item;
-            return {
-              ...item,
-              title: entry.title.trim(),
-              category: entry.category,
-              type: entry.type,
-              source: entry.source.trim() || entry.sourceUrl || '미지정',
-              sourceUrl: entry.sourceUrl.trim(),
-              summary: entry.summary.trim(),
-              tags: entry.tags || [],
-            };
-          });
-        });
-        setAdminMessage('콘텐츠가 수정되었습니다.');
-        setEditingItemId('');
+      if (USE_GITHUB_LIBRARY) {
+        await publishToGitHub(buildUpsertPayload(entry, draft.summary));
+        setAdminMessage(isUpdate ? 'GitHub에 수정 내용이 반영되었습니다.' : 'GitHub에 콘텐츠가 저장되었습니다.');
       } else {
-        buildItemAndSave({
-          id: `admin-${Date.now()}`,
-          title: entry.title,
-          category: entry.category,
-          type: entry.type,
-          source: entry.source,
-          sourceUrl: entry.sourceUrl,
-          summary: entry.summary,
-          tags: entry.tags,
-        });
-        setAdminMessage('콘텐츠가 라이브러리에 저장되었습니다.');
+        setAdminMessage(isUpdate ? '로컬에서 수정되었습니다.' : '로컬에 저장되었습니다.');
       }
 
-      if (AUTO_GITHUB_PUBLISH) {
-        try {
-          const result = await publishMarkdownToGitHub(entry, entry.summary);
-          if (result?.commit) {
-            setAdminMessage(isUpdate ? '콘텐츠 수정 + GitHub 커밋 완료.' : '콘텐츠 저장 + GitHub 커밋 완료.');
-          } else {
-            setAdminMessage('콘텐츠 저장 완료. GitHub 자동 업로드는 비활성입니다.');
-          }
-        } catch (error) {
-          console.error(error);
-          setAdminMessage(`콘텐츠 저장은 완료되었지만 GitHub 업로드 실패: ${error.message}`);
-        }
-      }
+      setLibrary((prev) => {
+        const next = isUpdate
+          ? prev.map((item) => (item.id === editingItemId ? { ...item, ...entry } : item))
+          : [...prev];
+        const filtered = isUpdate ? next.filter((item) => item.id !== editingItemId) : next;
+        const nextList = [
+          {
+            ...entry,
+            summary: entry.summary,
+          },
+          ...filtered.filter((item) => item.id !== entry.id),
+        ].sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt));
+
+        return nextList;
+      });
+      setEditingItemId('');
+    } catch (error) {
+      console.error(error);
+      setAdminMessage(`저장 실패: ${error.message}`);
     } finally {
       setAdminBusy(false);
     }
@@ -875,17 +938,83 @@ export default function App() {
     await handleSaveAdmin();
   };
 
+  const handleCommentField = (event) => {
+    const { name, value } = event.target;
+    setCommentForm((prev) => ({ ...prev, [name]: value }));
+  };
+
+  const loadComments = async (itemId) => {
+    if (!itemId) {
+      setComments([]);
+      return;
+    }
+    try {
+      setCommentLoading(true);
+      const next = await loadCommentsFromGitHub(itemId);
+      setComments(next);
+      setCommentMessage('');
+    } catch (error) {
+      console.error(error);
+      setCommentMessage('댓글을 불러오지 못했습니다.');
+    } finally {
+      setCommentLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!currentItem?.id) {
+      setComments([]);
+      return;
+    }
+    loadComments(currentItem.id);
+  }, [currentItem?.id]);
+
+  const handleCommentSubmit = async (event) => {
+    event.preventDefault();
+    if (!currentItem?.id) return;
+
+    const name = commentForm.name.trim();
+    const message = commentForm.message.trim();
+    const password = commentForm.password.trim();
+
+    if (!name || !message || !password) {
+      setCommentMessage('이름, 메시지, 비밀번호를 모두 입력하세요.');
+      return;
+    }
+
+    setCommentBusy(true);
+    try {
+      const next = await submitCommentToGitHub({
+        itemId: currentItem.id,
+        name,
+        message,
+        password,
+      });
+      setComments(next);
+      setCommentForm((prev) => ({ ...prev, message: '', password: '' }));
+      setCommentMessage('댓글이 등록되었습니다.');
+    } catch (error) {
+      console.error(error);
+      setCommentMessage(`댓글 등록 실패: ${error.message}`);
+    } finally {
+      setCommentBusy(false);
+    }
+  };
+
   return (
     <div className="app-shell">
       <header className="panel hero">
         <p className="eyebrow">George&apos;s Goodreads</p>
         <div className="hero-title-row">
-          <h1>george&apos;s goodreads</h1>
+          <button type="button" className="hero-title-btn" onClick={goToFeed}>
+            george&apos;s goodreads
+          </button>
           <span className="hero-count">{library.length}개 콘텐츠</span>
         </div>
         <p className="hero-desc">
           내가 좋다고 생각한 콘텐츠를 카테고리/형식별로 저장해 관리하는 큐레이션 페이지입니다.
         </p>
+        {libraryError ? <p className="muted status">{libraryError}</p> : null}
 
         <div className="view-switch" role="tablist" aria-label="뷰 전환">
           <button
@@ -1319,6 +1448,66 @@ export default function App() {
               <div className="markdown-block">
                 <MarkdownBlock markdown={currentItem.summary} />
               </div>
+
+              <section className="comment-section">
+                <div className="comment-title">댓글</div>
+                <div className="comment-list">
+                  {commentLoading ? (
+                    <p className="muted">댓글을 불러오는 중...</p>
+                  ) : comments.length === 0 ? (
+                    <p className="muted">아직 댓글이 없습니다.</p>
+                  ) : (
+                    comments.map((item) => (
+                      <div key={item.id} className="comment-item">
+                        <p className="comment-meta">
+                          <span>{item.name}</span>
+                          <span>{formatDate(item.createdAt)}</span>
+                        </p>
+                        <p>{item.message}</p>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <form className="comment-form" onSubmit={handleCommentSubmit}>
+                  <label className="form-row">
+                    이름
+                    <input
+                      name="name"
+                      value={commentForm.name}
+                      onChange={handleCommentField}
+                      placeholder="이름"
+                    />
+                  </label>
+                  <label className="form-row">
+                    메시지
+                    <textarea
+                      name="message"
+                      value={commentForm.message}
+                      onChange={handleCommentField}
+                      rows={3}
+                      placeholder="댓글을 입력하세요."
+                    />
+                  </label>
+                  <label className="form-row">
+                    비밀번호
+                    <input
+                      name="password"
+                      type="password"
+                      value={commentForm.password}
+                      onChange={handleCommentField}
+                      placeholder="삭제/수정 비밀번호"
+                    />
+                  </label>
+                  <div className="admin-actions">
+                    <button type="submit" className="btn btn-submit" disabled={commentBusy}>
+                      댓글 작성
+                    </button>
+                  </div>
+                </form>
+                {commentMessage ? <p className="muted">{commentMessage}</p> : null}
+                {commentBusy ? <p className="muted">댓글 등록 중...</p> : null}
+              </section>
             </article>
           )}
         </section>
@@ -1334,7 +1523,9 @@ export default function App() {
                 {query && ` · 검색: ${query}`}
               </p>
             </div>
-            {filteredItems.length === 0 ? (
+            {libraryLoading ? (
+              <p className="muted">콘텐츠 목록을 불러오는 중입니다.</p>
+            ) : filteredItems.length === 0 ? (
               <p className="muted empty-text">조건에 맞는 항목이 없습니다.</p>
             ) : (
               <div className="card-stack">
