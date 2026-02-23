@@ -1,9 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
 
 const STORAGE_KEY = 'georges-goodreads-library-v2';
+const ADMIN_SESSION_KEY = 'georges-goodreads-admin-session-v1';
+const ADMIN_SESSION_TTL_MS = 3 * 60 * 60 * 1000;
+const ADMIN_PASSWORD = import.meta.env.VITE_ADMIN_PASSWORD || '';
+const TRANSLATE_WITH_LLM_FIRST = (import.meta.env.VITE_TRANSLATE_PROVIDER || 'llm').toLowerCase() === 'llm';
 const DEFAULT_AUTHOR = '미지정';
 const AMBIGUITY_HINT = /\b(maybe|perhaps|likely|roughly|about|around|approximately|arguably|usually|could|might|appear to|appears to|generally|possibly|presumably|seems|seem to|appears)\b/i;
 const EXTRACT_PARAGRAPH_MAX = 1700;
+const AUTO_GITHUB_PUBLISH = (import.meta.env.VITE_AUTO_GITHUB_PUBLISH || 'false').toLowerCase() === 'true';
 
 const CATEGORY_OPTIONS = [
   { id: 'ai', label: 'ai, 바이브코딩' },
@@ -86,6 +91,44 @@ const ADMIN_MODE_DEFAULT = {
   notes: '',
   rawText: '',
   fileName: '',
+};
+
+const getAdminSession = () => {
+  try {
+    const raw = window.localStorage.getItem(ADMIN_SESSION_KEY);
+    if (!raw) return null;
+    const session = JSON.parse(raw);
+    if (!session?.until || !session?.token) return null;
+    if (session.until < Date.now()) {
+      window.localStorage.removeItem(ADMIN_SESSION_KEY);
+      return null;
+    }
+    return session;
+  } catch {
+    return null;
+  }
+};
+
+const saveAdminSession = () => {
+  try {
+    window.localStorage.setItem(
+      ADMIN_SESSION_KEY,
+      JSON.stringify({
+        token: `${ADMIN_PASSWORD || 'legacy'}`,
+        until: Date.now() + ADMIN_SESSION_TTL_MS,
+      }),
+    );
+  } catch {
+    // ignore
+  }
+};
+
+const clearAdminSession = () => {
+  try {
+    window.localStorage.removeItem(ADMIN_SESSION_KEY);
+  } catch {
+    // ignore
+  }
 };
 
 const parseTags = (raw) =>
@@ -292,6 +335,55 @@ const extractAmbiguityNotes = (text) => {
   );
 };
 
+const shouldUseLlms = async () => {
+  if (!TRANSLATE_WITH_LLM_FIRST) return false;
+  try {
+    const response = await fetch('/api/translate', {
+      method: 'OPTIONS',
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+};
+
+let translationCapable = null;
+
+const callLlmTranslation = async (text) => {
+  if (!text.trim()) return text;
+  const response = await fetch('/api/translate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+  });
+
+  if (!response.ok) {
+    const payload = await response
+      .json()
+      .catch(() => ({ message: `translate api failed: ${response.status}` }));
+    throw new Error(payload.error || `translate api failed: ${response.status}`);
+  }
+
+  const payload = await response.json();
+  if (!payload?.translatedText) {
+    throw new Error('translate api response is invalid');
+  }
+  return payload.translatedText;
+};
+
+const translateToProvider = async (text) => {
+  if (translationCapable === null) {
+    translationCapable = await shouldUseLlms();
+  }
+  if (!translationCapable) return translateWithGoogle(text);
+  try {
+    return await callLlmTranslation(text);
+  } catch (error) {
+    translationCapable = false;
+    return translateWithGoogle(text);
+  }
+};
+
 async function translateWithGoogle(text) {
   if (!text.trim()) return text;
   const endpoint = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ko&dt=t&q=${encodeURIComponent(text)}`;
@@ -325,7 +417,7 @@ async function translateToKorean(fullText, manualNotes) {
     const sourceSentences = sentences.length ? sentences : [chunk];
     for (const sentence of sourceSentences) {
       if (!sentence.trim()) continue;
-      const translated = await translateWithGoogle(sentence);
+      const translated = await translateToProvider(sentence);
       const line = AMBIGUITY_HINT.test(sentence)
         ? `${translated} (원문: "${sentence.replace(/"/g, '\\"')}")`
         : translated;
@@ -380,6 +472,36 @@ function buildYoutubeMarkdown({ sourceUrl, sourceName, summary, markdown }) {
   return `# 유튜브 콘텐츠 요약\n\n- 출처 링크: ${sourceUrl}\n- 채널: ${sourceName || '미지정'}\n\n${summary || '요약이 비어 있습니다.'}`;
 }
 
+const buildGitHubPath = (title, sourceUrl) => {
+  const prefix = new Date().toISOString().slice(0, 10);
+  const safe = safeFileName(title || 'content').replace(/\.md$/, '');
+  const origin = (() => {
+    try {
+      return new URL(sourceUrl).hostname.replace(/[^\w.-]/g, '-');
+    } catch {
+      return 'source';
+    }
+  })();
+  return `${prefix}/${origin}-${safe}-${Date.now()}.md`;
+};
+
+const publishToGitHub = async (payload) => {
+  const response = await fetch('/api/publish-content', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body?.error || 'GitHub 업로드 실패');
+  }
+
+  return body;
+};
+
 export default function App() {
   const [library, setLibrary] = useState(() => {
     try {
@@ -403,6 +525,8 @@ export default function App() {
   const [adminMessage, setAdminMessage] = useState('');
   const [adminGenerated, setAdminGenerated] = useState('');
   const [adminDownloadName, setAdminDownloadName] = useState('contents.md');
+  const [adminPassword, setAdminPassword] = useState('');
+  const [adminAuthenticated, setAdminAuthenticated] = useState(() => Boolean(getAdminSession()));
 
   useEffect(() => {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(library));
@@ -455,18 +579,18 @@ export default function App() {
     });
   };
 
-const buildItemAndSave = ({ id, title, category, type, source, sourceUrl, summary, tags }) => {
-  if (!title.trim() || !summary.trim()) return;
-  setLibrary((prev) => [
-    {
-      id,
-      title: title.trim(),
-      category,
-      type,
-      source: source.trim() || sourceUrl || '미지정',
-      sourceUrl: sourceUrl.trim(),
-      summary: summary.trim(),
-      tags,
+  const buildItemAndSave = ({ id, title, category, type, source, sourceUrl, summary, tags }) => {
+    if (!title.trim() || !summary.trim()) return;
+    setLibrary((prev) => [
+      {
+        id,
+        title: title.trim(),
+        category,
+        type,
+        source: source.trim() || sourceUrl || '미지정',
+        sourceUrl: sourceUrl.trim(),
+        summary: summary.trim(),
+        tags: tags || [],
         createdAt: new Date().toISOString(),
       },
       ...prev,
@@ -505,6 +629,33 @@ const buildItemAndSave = ({ id, title, category, type, source, sourceUrl, summar
 
   const handleAdminMode = (mode) => {
     resetAdminForm(mode);
+  };
+
+  const adminPasswordValid = (value) => {
+    if (ADMIN_PASSWORD) return value === ADMIN_PASSWORD;
+    return value === 'admin1234';
+  };
+
+  const handleAdminLogin = (event) => {
+    event.preventDefault();
+    if (!adminPassword.trim()) {
+      setAdminMessage('비밀번호를 입력하세요.');
+      return;
+    }
+    if (!adminPasswordValid(adminPassword.trim())) {
+      setAdminMessage('비밀번호가 일치하지 않습니다.');
+      return;
+    }
+    saveAdminSession();
+    setAdminAuthenticated(true);
+    setAdminMessage('관리자 인증이 완료되었습니다.');
+    setAdminPassword('');
+  };
+
+  const handleAdminLogout = () => {
+    clearAdminSession();
+    setAdminAuthenticated(false);
+    setAdminMessage('로그아웃 되었습니다.');
   };
 
   const handleFetchSourceText = async () => {
@@ -608,13 +759,31 @@ const buildItemAndSave = ({ id, title, category, type, source, sourceUrl, summar
     }
   };
 
-  const handleSaveAdmin = () => {
+  const publishMarkdownToGitHub = async (entry, markdownText) => {
+    if (!AUTO_GITHUB_PUBLISH) return null;
+    const filePath = buildGitHubPath(entry.title, entry.sourceUrl || entry.source);
+    const payload = {
+      filePath,
+      content: markdownText,
+      commitMessage: `${entry.type}: ${entry.title}`,
+      branch: import.meta.env.VITE_GITHUB_BRANCH || 'main',
+      tags: entry.tags || [],
+      category: entry.category,
+      source: entry.source,
+      sourceUrl: entry.sourceUrl,
+    };
+    return publishToGitHub(payload);
+  };
+
+  const handleSaveAdmin = async () => {
+    if (!adminGenerated) {
+      setAdminMessage('저장할 markdown가 먼저 생성되어야 합니다.');
+      return;
+    }
+
+    let entry;
     if (adminForm.mode === 'article') {
-      if (!adminGenerated) {
-        setAdminMessage('해외 article는 번역 마크다운을 먼저 생성해야 합니다.');
-        return;
-      }
-      buildItemAndSave({
+      entry = {
         id: `admin-${Date.now()}`,
         title: adminForm.title.trim() || '해외 article',
         category: adminForm.category,
@@ -623,17 +792,9 @@ const buildItemAndSave = ({ id, title, category, type, source, sourceUrl, summar
         sourceUrl: normalizeUrl(adminForm.sourceUrl),
         summary: adminGenerated,
         tags: parseTags(adminForm.tags),
-      });
-      setAdminMessage('해외 article가 라이브러리에 저장되었습니다.');
-      return;
-    }
-
-    if (adminForm.mode === 'naver') {
-      if (!adminForm.sourceUrl.trim() || !adminGenerated) {
-        setAdminMessage('국내 article는 요약 링크 생성 후 저장하세요.');
-        return;
-      }
-      buildItemAndSave({
+      };
+    } else if (adminForm.mode === 'naver') {
+      entry = {
         id: `admin-${Date.now()}`,
         title: adminForm.title.trim() || '국내 article',
         category: adminForm.category,
@@ -642,40 +803,72 @@ const buildItemAndSave = ({ id, title, category, type, source, sourceUrl, summar
         sourceUrl: normalizeUrl(adminForm.sourceUrl),
         summary: adminGenerated,
         tags: parseTags(adminForm.tags),
-      });
-      setAdminMessage('국내 article가 라이브러리에 저장되었습니다.');
-      return;
-    }
-
-    if (!adminGenerated || !adminForm.sourceUrl.trim()) {
-      setAdminMessage('유튜브는 .md 업로드 후 저장하세요.');
-      return;
-    }
-
-    buildItemAndSave({
-      id: `admin-${Date.now()}`,
-      title: adminForm.title.trim() || '유튜브 요약',
-      category: adminForm.category,
-      type: 'youtube',
-      source: adminForm.source || 'YouTube',
-      sourceUrl: normalizeUrl(adminForm.sourceUrl),
-      summary: buildYoutubeMarkdown({
+      };
+    } else {
+      if (!adminForm.sourceUrl.trim()) {
+        setAdminMessage('유튜브는 링크 입력과 .md 생성이 필요합니다.');
+        return;
+      }
+      entry = {
+        id: `admin-${Date.now()}`,
+        title: adminForm.title.trim() || '유튜브 요약',
+        category: adminForm.category,
+        type: 'youtube',
+        source: adminForm.source || 'YouTube',
         sourceUrl: normalizeUrl(adminForm.sourceUrl),
-        sourceName: adminForm.source,
-        markdown: adminGenerated,
-      }),
-      tags: parseTags(adminForm.tags),
-    });
-    setAdminMessage('유튜브 요약이 라이브러리에 저장되었습니다.');
+        summary: buildYoutubeMarkdown({
+          sourceUrl: normalizeUrl(adminForm.sourceUrl),
+          sourceName: adminForm.source,
+          markdown: adminGenerated,
+        }),
+        tags: parseTags(adminForm.tags),
+      };
+    }
+
+    if (!entry.sourceUrl) {
+      setAdminMessage('저장할 때 링크는 필수입니다.');
+      return;
+    }
+
+    setAdminBusy(true);
+    try {
+      buildItemAndSave({
+        id: entry.id,
+        title: entry.title,
+        category: entry.category,
+        type: entry.type,
+        source: entry.source,
+        sourceUrl: entry.sourceUrl,
+        summary: entry.summary,
+        tags: entry.tags,
+      });
+      setAdminMessage('콘텐츠가 라이브러리에 저장되었습니다.');
+
+      if (AUTO_GITHUB_PUBLISH) {
+        try {
+          const result = await publishMarkdownToGitHub(entry, entry.summary);
+          if (result?.commit) {
+            setAdminMessage('콘텐츠 저장 + GitHub 커밋 완료.');
+          } else {
+            setAdminMessage('콘텐츠 저장 완료. GitHub 자동 업로드는 비활성입니다.');
+          }
+        } catch (error) {
+          console.error(error);
+          setAdminMessage(`콘텐츠 저장은 완료되었지만 GitHub 업로드 실패: ${error.message}`);
+        }
+      }
+    } finally {
+      setAdminBusy(false);
+    }
   };
 
-  const handleSaveAndDownload = () => {
+  const handleSaveAndDownload = async () => {
     if (!adminGenerated) {
       setAdminMessage('저장 전 마크다운이 먼저 생성되어야 합니다.');
       return;
     }
     downloadMarkdown();
-    handleSaveAdmin();
+    await handleSaveAdmin();
   };
 
   return (
@@ -845,254 +1038,294 @@ const buildItemAndSave = ({ id, title, category, type, source, sourceUrl, summar
         </main>
       ) : (
         <section className="panel admin-panel">
-          <h2>콘텐츠 업로드 관리자</h2>
-          <p className="muted">타입을 선택하고 조건에 맞게 업로드하면 `.md`를 자동 생성/다운로드할 수 있습니다.</p>
+          <div className="admin-head-row">
+            <h2>콘텐츠 업로드 관리자</h2>
+            {adminAuthenticated ? (
+              <button type="button" className="btn" onClick={handleAdminLogout}>
+                로그아웃
+              </button>
+            ) : null}
+          </div>
+          {adminAuthenticated ? (
+            <>
+              <p className="muted">타입을 선택하고 조건에 맞게 업로드하면 `.md`를 자동 생성/다운로드할 수 있습니다.</p>
 
-          <div className="admin-mode-switch">
-            {TYPE_OPTIONS.map((mode) => {
-              const active = adminForm.mode === mode.id;
-              return (
-                <button
-                  key={mode.id}
-                  type="button"
-                  className={`chip ${active ? 'is-active' : ''}`}
-                  onClick={() => {
-                    setAdminForm((prev) => ({ ...ADMIN_MODE_DEFAULT, mode: mode.id, category: prev.category || 'ai' }));
-                    setAdminGenerated('');
-                    setAdminMessage('');
-                    setAdminDownloadName('contents.md');
+              <div className="admin-mode-switch">
+                {TYPE_OPTIONS.map((mode) => {
+                  const active = adminForm.mode === mode.id;
+                  return (
+                    <button
+                      key={mode.id}
+                      type="button"
+                      className={`chip ${active ? 'is-active' : ''}`}
+                      onClick={() => {
+                        setAdminForm((prev) => ({ ...ADMIN_MODE_DEFAULT, mode: mode.id, category: prev.category || 'ai' }));
+                        setAdminGenerated('');
+                        setAdminMessage('');
+                        setAdminDownloadName('contents.md');
+                      }}
+                    >
+                      {mode.label}
+                      <span className="admin-mode-note">{mode.description}</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="admin-grid">
+                <form
+                  className="admin-form"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    if (adminForm.mode === 'article') {
+                      handleGenerateForArticle();
+                    } else if (adminForm.mode === 'naver') {
+                      handleGenerateDomestic();
+                    } else if (adminForm.mode === 'youtube') {
+                      if (adminForm.summary.trim()) {
+                        setAdminGenerated(
+                          buildYoutubeMarkdown({
+                            sourceUrl: adminForm.sourceUrl,
+                            sourceName: adminForm.source,
+                            markdown: adminForm.summary,
+                          }),
+                        );
+                        setAdminMessage('유튜브 요약 미리보기 준비됨');
+                      } else {
+                        setAdminMessage('유튜브 `.md` 파일을 업로드하세요.');
+                      }
+                    }
                   }}
                 >
-                  {mode.label}
-                  <span className="admin-mode-note">{mode.description}</span>
-                </button>
-              );
-            })}
-          </div>
-
-          <div className="admin-grid">
-            <form
-              className="admin-form"
-              onSubmit={(event) => {
-                event.preventDefault();
-                if (adminForm.mode === 'article') {
-                  handleGenerateForArticle();
-                } else if (adminForm.mode === 'naver') {
-                  handleGenerateDomestic();
-                } else if (adminForm.mode === 'youtube') {
-                  if (adminForm.summary.trim()) {
-                    setAdminGenerated(
-                      buildYoutubeMarkdown({ sourceUrl: adminForm.sourceUrl, sourceName: adminForm.source, markdown: adminForm.summary }),
-                    );
-                    setAdminMessage('유튜브 요약 미리보기 준비됨');
-                  } else {
-                    setAdminMessage('유튜브 `.md` 파일을 업로드하세요.');
-                  }
-                }
-              }}
-            >
-              <label className="form-row">
-                카테고리
-                <select name="category" value={adminForm.category} onChange={handleAdminField}>
-                  {CATEGORY_OPTIONS.map((category) => (
-                    <option key={category.id} value={category.id}>
-                      {category.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="form-row">
-                제목
-                <input
-                  name="title"
-                  value={adminForm.title}
-                  onChange={handleAdminField}
-                  placeholder="콘텐츠 제목"
-                />
-              </label>
-
-              <label className="form-row">
-                링크
-                <input
-                  name="sourceUrl"
-                  value={adminForm.sourceUrl}
-                  onChange={handleAdminField}
-                  placeholder="https://..."
-                />
-              </label>
-
-              <label className="form-row">
-                출처/채널명
-                <input
-                  name="source"
-                  value={adminForm.source}
-                  onChange={handleAdminField}
-                  placeholder="reddit, X, YouTube, Naver ... "
-                />
-              </label>
-
-              <label className="form-row">
-                태그(쉼표)
-                <input
-                  name="tags"
-                  value={adminForm.tags}
-                  onChange={handleAdminField}
-                  placeholder="AI, 트레이딩, 건강"
-                />
-              </label>
-
-              {adminForm.mode === 'article' && (
-                <>
                   <label className="form-row">
-                    저자
+                    카테고리
+                    <select name="category" value={adminForm.category} onChange={handleAdminField}>
+                      {CATEGORY_OPTIONS.map((category) => (
+                        <option key={category.id} value={category.id}>
+                          {category.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="form-row">
+                    제목
                     <input
-                      name="author"
-                      value={adminForm.author}
+                      name="title"
+                      value={adminForm.title}
                       onChange={handleAdminField}
-                      placeholder="원문 저자"
+                      placeholder="콘텐츠 제목"
                     />
                   </label>
-                  <div className="form-row two-cols">
-                    <button
-                      type="button"
-                      className="btn"
-                      onClick={handleFetchSourceText}
-                      disabled={adminBusy}
-                    >
-                      해외 URL 원문 추출
+
+                  <label className="form-row">
+                    링크
+                    <input
+                      name="sourceUrl"
+                      value={adminForm.sourceUrl}
+                      onChange={handleAdminField}
+                      placeholder="https://..."
+                    />
+                  </label>
+
+                  <label className="form-row">
+                    출처/채널명
+                    <input
+                      name="source"
+                      value={adminForm.source}
+                      onChange={handleAdminField}
+                      placeholder="reddit, X, YouTube, Naver ... "
+                    />
+                  </label>
+
+                  <label className="form-row">
+                    태그(쉼표)
+                    <input
+                      name="tags"
+                      value={adminForm.tags}
+                      onChange={handleAdminField}
+                      placeholder="AI, 트레이딩, 건강"
+                    />
+                  </label>
+
+                  {adminForm.mode === 'article' && (
+                    <>
+                      <label className="form-row">
+                        저자
+                        <input
+                          name="author"
+                          value={adminForm.author}
+                          onChange={handleAdminField}
+                          placeholder="원문 저자"
+                        />
+                      </label>
+                      <div className="form-row two-cols">
+                        <button
+                          type="button"
+                          className="btn"
+                          onClick={handleFetchSourceText}
+                          disabled={adminBusy}
+                        >
+                          해외 URL 원문 추출
+                        </button>
+                        <button
+                          type="button"
+                          className="btn ghost"
+                          onClick={handleGenerateForArticle}
+                          disabled={adminBusy || (!adminForm.rawText.trim() && !adminForm.summary.trim())}
+                        >
+                          번역.md 생성
+                        </button>
+                      </div>
+                      <label className="form-row">
+                        원문(자동 추출 실패 시 붙여넣기)
+                        <textarea
+                          name="rawText"
+                          value={adminForm.rawText}
+                          onChange={handleAdminField}
+                          rows={12}
+                          placeholder="url 추출 후 본문이 들어옵니다. 필요하면 직접 붙여넣어도 됩니다."
+                        />
+                      </label>
+                      <label className="form-row">
+                        번역 보조 메모 (문장 뒤에 역자주로 반영)
+                        <textarea
+                          name="notes"
+                          value={adminForm.notes}
+                          onChange={handleAdminField}
+                          rows={4}
+                          placeholder="예: 핵심 문장의 배경 설명 필요\n예: 용어는 그대로 두는 게 맞음"
+                        />
+                      </label>
+                      <p className="muted">
+                        프롬프트 기반 처리 규칙:
+                        <br />
+                        이 글 전문 full text를 한 문장도 빼지 말고 번역하며, 가능한 의역을 사용하고, 모호한 표현은
+                        (원문: "...") / (역자 주. "...") 형식으로 처리합니다.
+                      </p>
+                    </>
+                  )}
+
+                  {adminForm.mode === 'naver' && (
+                    <label className="form-row">
+                      요약
+                      <textarea
+                        name="summary"
+                        value={adminForm.summary}
+                        onChange={handleAdminField}
+                        rows={12}
+                        placeholder="요약 문단만 입력하세요."
+                      />
+                    </label>
+                  )}
+
+                  {adminForm.mode === 'youtube' && (
+                    <>
+                      <label className="form-row">
+                        요약 .md 파일 업로드
+                        <input type="file" accept=".md,text/markdown" onChange={handleYoutubeFile} />
+                      </label>
+                      <label className="form-row">
+                        업로드 예외 텍스트(직접 붙여넣기)
+                        <textarea
+                          name="summary"
+                          value={adminForm.summary}
+                          onChange={handleAdminField}
+                          rows={10}
+                          placeholder="# 제목\n요약 내용..."
+                        />
+                      </label>
+                    </>
+                  )}
+
+                  <div className="admin-actions">
+                    <button type="submit" className="btn btn-submit">
+                      미리보기 생성
                     </button>
                     <button
                       type="button"
                       className="btn ghost"
-                      onClick={handleGenerateForArticle}
-                      disabled={adminBusy || (!adminForm.rawText.trim() && !adminForm.summary.trim())}
+                      onClick={handleSaveAdmin}
+                      disabled={adminBusy || !adminGenerated}
                     >
-                      번역.md 생성
+                      저장만
                     </button>
-                  </div>
-                  <label className="form-row">
-                    원문(자동 추출 실패 시 붙여넣기)
-                    <textarea
-                      name="rawText"
-                      value={adminForm.rawText}
-                      onChange={handleAdminField}
-                      rows={12}
-                      placeholder="url 추출 후 본문이 들어옵니다. 필요하면 직접 붙여넣어도 됩니다."
-                    />
-                  </label>
-                  <label className="form-row">
-                    번역 보조 메모 (문장 뒤에 역자주로 반영)
-                    <textarea
-                      name="notes"
-                      value={adminForm.notes}
-                      onChange={handleAdminField}
-                      rows={4}
-                      placeholder="예: 핵심 문장의 배경 설명 필요\n예: 용어는 그대로 두는 게 맞음"
-                    />
-                  </label>
-                  <p className="muted">
-                    프롬프트 기반 처리 규칙:
-                    <br />
-                    이 글 전문 full text를 한 문장도 빼지 말고 번역하며, 가능한 의역을 사용하고, 모호한 표현은 (원문: "...") / (역자 주. "...") 형식으로 처리합니다.
-                  </p>
-                </>
-              )}
-
-              {adminForm.mode === 'naver' && (
-                <label className="form-row">
-                  요약
-                  <textarea
-                    name="summary"
-                    value={adminForm.summary}
-                    onChange={handleAdminField}
-                    rows={12}
-                    placeholder="요약 문단만 입력하세요."
-                  />
-                </label>
-              )}
-
-              {adminForm.mode === 'youtube' && (
-                <>
-                  <label className="form-row">
-                    요약 .md 파일 업로드
-                    <input type="file" accept=".md,text/markdown" onChange={handleYoutubeFile} />
-                  </label>
-                  <label className="form-row">
-                    업로드 예외 텍스트(직접 붙여넣기)
-                    <textarea
-                      name="summary"
-                      value={adminForm.summary}
-                      onChange={handleAdminField}
-                      rows={10}
-                      placeholder="# 제목\n요약 내용..."
-                    />
-                  </label>
-                </>
-              )}
-
-              <div className="admin-actions">
-                <button type="submit" className="btn btn-submit">
-                  미리보기 생성
-                </button>
-                <button
-                  type="button"
-                  className="btn ghost"
-                  onClick={handleSaveAdmin}
-                  disabled={adminBusy || !adminGenerated}
-                >
-                  저장만
-                </button>
                 <button
                   type="button"
                   className="btn ghost"
                   onClick={handleSaveAndDownload}
                   disabled={adminBusy || !adminGenerated}
                 >
-                  파일 저장 + 저장
+                  md 다운로드 + 저장
                 </button>
-                <button
-                  type="button"
-                  className="btn"
-                  onClick={() => handleAdminMode(adminForm.mode)}
-                >
-                  초기화
-                </button>
-              </div>
-            </form>
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => handleAdminMode(adminForm.mode)}
+                    >
+                      초기화
+                    </button>
+                  </div>
+                </form>
 
-            <aside className="admin-preview">
-              <div className="feed-head" style={{ marginBottom: 8 }}>
-                <h3>생성된 .md</h3>
-                <span className="item-date">저장 전 미리보기</span>
-              </div>
-              <div className="admin-preview-box">
-                {adminGenerated ? (
-                  <MarkdownBlock markdown={adminGenerated} />
-                ) : (
-                  <p className="muted">여기에 생성된 마크다운이 표시됩니다.</p>
-                )}
-              </div>
+                <aside className="admin-preview">
+                  <div className="feed-head" style={{ marginBottom: 8 }}>
+                    <h3>생성된 .md</h3>
+                    <span className="item-date">저장 전 미리보기</span>
+                  </div>
+                  <div className="admin-preview-box">
+                    {adminGenerated ? (
+                      <MarkdownBlock markdown={adminGenerated} />
+                    ) : (
+                      <p className="muted">여기에 생성된 마크다운이 표시됩니다.</p>
+                    )}
+                  </div>
 
-              <div className="admin-download-row">
-                <button
-                  type="button"
-                  className="btn btn-submit"
-                  onClick={downloadMarkdown}
-                  disabled={!adminGenerated}
-                >
-                  md 다운로드
-                </button>
+                  <div className="admin-download-row">
+                    <button
+                      type="button"
+                      className="btn btn-submit"
+                      onClick={downloadMarkdown}
+                      disabled={!adminGenerated}
+                    >
+                      md 다운로드
+                    </button>
+                    <input
+                      type="text"
+                      className="download-name"
+                      value={adminDownloadName}
+                      onChange={(event) => setAdminDownloadName(event.target.value)}
+                      placeholder="파일명.md"
+                    />
+                  </div>
+                </aside>
+              </div>
+            </>
+          ) : (
+            <form className="admin-auth" onSubmit={handleAdminLogin}>
+              <h3>관리자 인증</h3>
+              <p className="muted">관리자 페이지 접근을 위해 비밀번호를 입력해주세요.</p>
+              <label className="form-row">
+                관리자 비밀번호
                 <input
-                  type="text"
-                  className="download-name"
-                  value={adminDownloadName}
-                  onChange={(event) => setAdminDownloadName(event.target.value)}
-                  placeholder="파일명.md"
+                  type="password"
+                  value={adminPassword}
+                  onChange={(event) => setAdminPassword(event.target.value)}
+                  placeholder={ADMIN_PASSWORD ? '비밀번호' : '기본 비밀번호: admin1234'}
                 />
+              </label>
+              <div className="admin-actions">
+                <button type="submit" className="btn btn-submit">
+                  인증하기
+                </button>
               </div>
-            </aside>
-          </div>
+              {!ADMIN_PASSWORD ? (
+                <p className="muted">
+                  운영에서는 VITE_ADMIN_PASSWORD 환경변수를 설정하면 보안을 강화할 수 있습니다.
+                </p>
+              ) : null}
+            </form>
+          )}
 
           {adminMessage ? <p className="muted status">{adminMessage}</p> : null}
           {adminBusy ? <p className="muted">작업 중...</p> : null}

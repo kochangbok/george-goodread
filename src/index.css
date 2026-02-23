@@ -404,6 +404,28 @@ option {
   margin-bottom: 12px;
 }
 
+.admin-head-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.admin-auth {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.admin-auth h3 {
+  margin: 0;
+  font-size: 13px;
+  color: #9caea6;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+}
+
 .admin-mode-note {
   display: block;
   color: #98a6a0;
