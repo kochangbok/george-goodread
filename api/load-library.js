@@ -1,4 +1,4 @@
-import { getRepoConfig, readRepoJson, readRepoFile } from './_github';
+import { getRepoConfig, readRepoJson, readRepoFile } from './_github.js';
 
 const normalizeItems = (items = []) =>
   items

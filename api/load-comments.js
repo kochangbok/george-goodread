@@ -1,4 +1,4 @@
-import { getRepoConfig, readRepoJson } from './_github';
+import { getRepoConfig, readRepoJson } from './_github.js';
 
 const normalizeComments = (comments = []) =>
   comments

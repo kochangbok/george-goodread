@@ -1,5 +1,5 @@
-import { getRepoConfig, readRepoJson, readRepoFile, writeRepoFile } from './_github';
-import { requireAdminApiKey } from './_api-auth';
+import { getRepoConfig, readRepoJson, readRepoFile, writeRepoFile } from './_github.js';
+import { requireAdminApiKey } from './_api-auth.js';
 
 const normalizeItem = (item) => {
   const now = new Date().toISOString();

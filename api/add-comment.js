@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { getRepoConfig, readRepoJson, readRepoFile, writeRepoFile } from './_github';
+import { getRepoConfig, readRepoJson, readRepoFile, writeRepoFile } from './_github.js';
 
 const normalizeItemId = (value) => String(value || '').replace(/[^a-zA-Z0-9_.-]/g, '_');
 const normalizeInput = (value) => String(value || '').trim();
