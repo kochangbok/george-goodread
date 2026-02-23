@@ -4,10 +4,7 @@ const STORAGE_KEY = 'georges-goodreads-library-v2';
 const ADMIN_SESSION_KEY = 'georges-goodreads-admin-session-v1';
 const ADMIN_SESSION_TTL_MS = 3 * 60 * 60 * 1000;
 const ADMIN_PASSWORD = import.meta.env.VITE_ADMIN_PASSWORD || '';
-const TRANSLATE_WITH_LLM_FIRST = (import.meta.env.VITE_TRANSLATE_PROVIDER || 'llm').toLowerCase() === 'llm';
 const DEFAULT_AUTHOR = '미지정';
-const AMBIGUITY_HINT = /\b(maybe|perhaps|likely|roughly|about|around|approximately|arguably|usually|could|might|appear to|appears to|generally|possibly|presumably|seems|seem to|appears)\b/i;
-const EXTRACT_PARAGRAPH_MAX = 1700;
 const AUTO_GITHUB_PUBLISH = (import.meta.env.VITE_AUTO_GITHUB_PUBLISH || 'false').toLowerCase() === 'true';
 
 const CATEGORY_OPTIONS = [
@@ -25,7 +22,7 @@ const TYPE_OPTIONS = [
     label: '해외 article',
     icon: '🌍',
     color: '#79d18e',
-    description: 'URL 기반 전문 추출 후 한국어 번역 업로드',
+    description: '원문 링크 + md 복붙/업로드',
   },
   {
     id: 'youtube',
@@ -88,7 +85,6 @@ const ADMIN_MODE_DEFAULT = {
   author: '',
   tags: '',
   summary: '',
-  notes: '',
   rawText: '',
   fileName: '',
 };
@@ -255,44 +251,6 @@ const safeFileName = (value) => {
   return `${String(value || fallback).replace(/[^a-zA-Z0-9가-힣._-]/g, '_').slice(0, 45)}.md`;
 };
 
-const splitTextByLength = (text, max = EXTRACT_PARAGRAPH_MAX) => {
-  const raw = text.trim();
-  if (!raw) return [];
-  const lines = raw.split('\n');
-  const chunks = [];
-  let current = '';
-
-  for (const line of lines) {
-    const segment = line.trim();
-    if (!segment) {
-      if (current) {
-        chunks.push(current.trim());
-        current = '';
-      }
-      continue;
-    }
-    if (segment.length > max) {
-      if (current) {
-        chunks.push(current.trim());
-        current = '';
-      }
-      for (let i = 0; i < segment.length; i += max) {
-        chunks.push(segment.slice(i, i + max));
-      }
-      continue;
-    }
-    if (current.length + segment.length + 1 > max) {
-      chunks.push(current.trim());
-      current = segment;
-      continue;
-    }
-    current = current ? `${current}\n${segment}` : segment;
-  }
-
-  if (current) chunks.push(current.trim());
-  return chunks;
-};
-
 const normalizeExtracted = (text) => {
   return String(text)
     .replace(/\r/g, '')
@@ -318,127 +276,6 @@ const pickTitleFromText = (sourceText, fallbackUrl) => {
   }
 };
 
-const extractAmbiguityNotes = (text) => {
-  return (
-    text
-      .toString()
-      .replace(/\r/g, '')
-      .replace(/\n+/g, ' ')
-      .match(/[^.!?]+[.!?]*/g)
-      ?.map((item) => item.trim())
-      .filter((item) => item.length > 24 && AMBIGUITY_HINT.test(item))
-      .slice(0, 3)
-      .map((line) => {
-        const safeLine = line.length > 120 ? `${line.slice(0, 120)}...` : line;
-        return `(원문: "${safeLine.replace(/"/g, '\\"')}")`;
-      }) ?? []
-  );
-};
-
-const shouldUseLlms = async () => {
-  if (!TRANSLATE_WITH_LLM_FIRST) return false;
-  try {
-    const response = await fetch('/api/translate', {
-      method: 'OPTIONS',
-    });
-    return response.ok;
-  } catch {
-    return false;
-  }
-};
-
-let translationCapable = null;
-
-const callLlmTranslation = async (text) => {
-  if (!text.trim()) return text;
-  const response = await fetch('/api/translate', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text }),
-  });
-
-  if (!response.ok) {
-    const payload = await response
-      .json()
-      .catch(() => ({ message: `translate api failed: ${response.status}` }));
-    throw new Error(payload.error || `translate api failed: ${response.status}`);
-  }
-
-  const payload = await response.json();
-  if (!payload?.translatedText) {
-    throw new Error('translate api response is invalid');
-  }
-  return payload.translatedText;
-};
-
-const translateToProvider = async (text) => {
-  if (translationCapable === null) {
-    translationCapable = await shouldUseLlms();
-  }
-  if (!translationCapable) return translateWithGoogle(text);
-  try {
-    return await callLlmTranslation(text);
-  } catch (error) {
-    translationCapable = false;
-    return translateWithGoogle(text);
-  }
-};
-
-async function translateWithGoogle(text) {
-  if (!text.trim()) return text;
-  const endpoint = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ko&dt=t&q=${encodeURIComponent(text)}`;
-  const response = await fetch(endpoint);
-  if (!response.ok) {
-    throw new Error('번역 API 호출 실패');
-  }
-  const payload = await response.json();
-  if (!Array.isArray(payload) || !Array.isArray(payload[0])) return text;
-  return payload[0]
-    .map((part) => part?.[0] ?? '')
-    .join('')
-    .replace(/\s+/g, ' ')
-    .trim();
-};
-
-async function translateToKorean(fullText, manualNotes) {
-  const splitToSentences = (text) =>
-    text
-      .replace(/\r/g, '')
-      .replace(/\n+/g, ' ')
-      .match(/[^.!?]+[.!?]*/g)
-      ?.map((item) => item.trim())
-      .filter(Boolean) ?? [];
-
-  const chunks = splitTextByLength(fullText);
-  const translatedBlocks = [];
-  for (const chunk of chunks) {
-    const sentences = splitToSentences(chunk);
-    const translatedSentences = [];
-    const sourceSentences = sentences.length ? sentences : [chunk];
-    for (const sentence of sourceSentences) {
-      if (!sentence.trim()) continue;
-      const translated = await translateToProvider(sentence);
-      const line = AMBIGUITY_HINT.test(sentence)
-        ? `${translated} (원문: "${sentence.replace(/"/g, '\\"')}")`
-        : translated;
-      translatedSentences.push(line);
-      await new Promise((resolve) => setTimeout(resolve, 90));
-    }
-    translatedBlocks.push(translatedSentences.join('\n\n'));
-  }
-
-  const merged = translatedBlocks.join('\n\n');
-  const ambiguity = extractAmbiguityNotes(fullText).join('\n\n');
-  const cleanManual = manualNotes
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => `(역자 주. "${line.replace(/"/g, '\\"')}")`)
-    .join('\n');
-  const appendix = [ambiguity, cleanManual].filter(Boolean).join('\n\n');
-  return `${merged}${appendix ? `\n\n${appendix}` : ''}`;
-}
-
 async function fetchArticleText(url) {
   const normalized = normalizeUrl(url);
   const cleaned = normalized.replace(/^https?:\/\//i, '');
@@ -451,7 +288,7 @@ async function fetchArticleText(url) {
   return normalizeExtracted(raw);
 }
 
-function buildOverseasMarkdown({ title, sourceUrl, author, translatedBody }) {
+function buildOverseasMarkdown({ title, sourceUrl, author, markdownBody }) {
   const href = normalizeUrl(sourceUrl);
   let host = '미확인';
   try {
@@ -460,7 +297,13 @@ function buildOverseasMarkdown({ title, sourceUrl, author, translatedBody }) {
     // keep fallback
   }
 
-  return `# ${title}\n\n- 원문 링크: ${href}\n- 저자: ${author || DEFAULT_AUTHOR}\n- 출처: ${host}\n- 영어 원문: [링크](${href})\n\n## 번역본\n\n${translatedBody}\n\n---\n\n원문 링크와 저자만 보존하고, 전체 본문을 빠짐없이 자연스러운 한국어로 번역한 결과입니다.`;
+  const normalizedBody = String(markdownBody || '').trim();
+  const finalBody = normalizedBody || '요약이 비어 있습니다.';
+  const hasSourceMeta = /^\s*-\s*원문 링크:\s*/m.test(normalizedBody);
+  if (hasSourceMeta) {
+    return normalizedBody;
+  }
+  return `# ${title}\n\n- 원문 링크: ${href}\n- 저자: ${author || DEFAULT_AUTHOR}\n- 출처: ${host}\n\n${finalBody}`;
 }
 
 function buildDomesticMarkdown({ title, sourceUrl, summary }) {
@@ -686,29 +529,29 @@ export default function App() {
       setAdminMessage('해외 article url이 필요합니다.');
       return;
     }
-    if (!adminForm.rawText.trim() && !adminForm.summary.trim()) {
-      setAdminMessage('원문 텍스트가 비어 있습니다. URL 추출 또는 본문 입력이 필요합니다.');
+    if (!adminForm.summary.trim()) {
+      setAdminMessage('번역본 .md 내용을 붙여넣거나 파일 업로드해주세요.');
       return;
     }
     try {
       setAdminBusy(true);
-      setAdminMessage('번역/정규화 중...');
-      const sourceText = adminForm.rawText.trim() || adminForm.summary.trim();
-      const sourceTitle = pickTitleFromText(sourceText, adminForm.sourceUrl);
-      const translated = await translateToKorean(sourceText, adminForm.notes);
-      const title = adminForm.title.trim() || sourceTitle;
+      setAdminMessage('마크다운 정리 중...');
+      const sourceTitle = adminForm.title.trim() || pickTitleFromText(adminForm.summary, adminForm.sourceUrl);
+      if (!adminForm.title.trim()) {
+        setAdminForm((prev) => ({ ...prev, title: sourceTitle }));
+      }
       const markdown = buildOverseasMarkdown({
-        title,
+        title: sourceTitle,
         sourceUrl: normalizeUrl(adminForm.sourceUrl),
         author: adminForm.author.trim() || DEFAULT_AUTHOR,
-        translatedBody: translated,
+        markdownBody: adminForm.summary,
       });
       setAdminGenerated(markdown);
-      setAdminDownloadName(safeFileName(`${title}-overseas-article`));
-      setAdminMessage('번역 마크다운 생성 완료');
+      setAdminDownloadName(adminForm.fileName ? safeFileName(adminForm.fileName) : safeFileName(`${sourceTitle}-overseas-article`));
+      setAdminMessage('해외 article 마크다운 생성 완료');
     } catch (error) {
       console.error(error);
-      setAdminMessage('번역 생성에 실패했습니다.');
+      setAdminMessage('마크다운 생성에 실패했습니다.');
     } finally {
       setAdminBusy(false);
     }
@@ -730,7 +573,7 @@ export default function App() {
     setAdminMessage('국내 article 마크다운 생성 완료');
   };
 
-  const handleYoutubeFile = async (event) => {
+  const handleMarkdownFileUpload = async (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
@@ -752,7 +595,7 @@ export default function App() {
       }));
       setAdminGenerated(raw);
       setAdminDownloadName(file.name || 'youtube-summary.md');
-      setAdminMessage('유튜브 요약 .md 업로드 완료');
+      setAdminMessage('요약 .md 업로드 완료');
     } catch (error) {
       console.error(error);
       setAdminMessage('.md 파일을 읽는 동안 오류가 발생했습니다.');
@@ -1028,7 +871,7 @@ export default function App() {
             <p className="muted">관리자 페이지에서 타입별로 업로드하세요.</p>
             <div className="md-guide">
               <p className="md-guide-title">해외 article</p>
-              <p>URL + 전문 + 번역 생성 후 .md 업로드 저장</p>
+              <p>원문 링크 + 번역본 md 붙여넣기 또는 업로드</p>
               <p className="md-guide-title">국내 article</p>
               <p>요약 + 리다이렉트 링크만 등록</p>
               <p className="md-guide-title">유튜브</p>
@@ -1166,42 +1009,34 @@ export default function App() {
                           onClick={handleFetchSourceText}
                           disabled={adminBusy}
                         >
-                          해외 URL 원문 추출
+                          원문 링크에서 제목만 추출(선택)
                         </button>
                         <button
                           type="button"
                           className="btn ghost"
                           onClick={handleGenerateForArticle}
-                          disabled={adminBusy || (!adminForm.rawText.trim() && !adminForm.summary.trim())}
+                          disabled={adminBusy || !adminForm.summary.trim()}
                         >
-                          번역.md 생성
+                          마크다운 생성
                         </button>
                       </div>
                       <label className="form-row">
-                        원문(자동 추출 실패 시 붙여넣기)
-                        <textarea
-                          name="rawText"
-                          value={adminForm.rawText}
-                          onChange={handleAdminField}
-                          rows={12}
-                          placeholder="url 추출 후 본문이 들어옵니다. 필요하면 직접 붙여넣어도 됩니다."
-                        />
+                        번역 .md 업로드
+                        <input type="file" accept=".md,text/markdown" onChange={handleMarkdownFileUpload} />
                       </label>
                       <label className="form-row">
-                        번역 보조 메모 (문장 뒤에 역자주로 반영)
+                        번역 .md 붙여넣기
                         <textarea
-                          name="notes"
-                          value={adminForm.notes}
+                          name="summary"
+                          value={adminForm.summary}
                           onChange={handleAdminField}
-                          rows={4}
-                          placeholder="예: 핵심 문장의 배경 설명 필요\n예: 용어는 그대로 두는 게 맞음"
+                          rows={12}
+                          placeholder="해외 article 번역본 마크다운을 붙여넣으세요."
                         />
                       </label>
                       <p className="muted">
-                        프롬프트 기반 처리 규칙:
-                        <br />
-                        이 글 전문 full text를 한 문장도 빼지 말고 번역하며, 가능한 의역을 사용하고, 모호한 표현은
-                        (원문: "...") / (역자 주. "...") 형식으로 처리합니다.
+                        번역된 최종 마크다운을 붙여넣으면 제목은 그대로 저장됩니다.
+                        제목 자동 추출이 필요하면 먼저 제목 가져오기 버튼을 눌러보세요.
                       </p>
                     </>
                   )}
@@ -1223,7 +1058,7 @@ export default function App() {
                     <>
                       <label className="form-row">
                         요약 .md 파일 업로드
-                        <input type="file" accept=".md,text/markdown" onChange={handleYoutubeFile} />
+                        <input type="file" accept=".md,text/markdown" onChange={handleMarkdownFileUpload} />
                       </label>
                       <label className="form-row">
                         업로드 예외 텍스트(직접 붙여넣기)
