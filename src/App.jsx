@@ -889,7 +889,8 @@ export default function App() {
 
       <section className="panel controls">
         {route.page === 'item' ? null : (
-        <div className="control-row">
+          <>
+            <div className="control-row">
           <label htmlFor="query-input">검색</label>
           <input
             id="query-input"
@@ -945,6 +946,7 @@ export default function App() {
             })}
           </div>
         </div>
+          </>
         )}
       </section>
 
